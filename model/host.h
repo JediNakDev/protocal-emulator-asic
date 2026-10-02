@@ -19,18 +19,19 @@ typedef struct {
 
 void host_init(host *h, board *b, int edge);
 void host_wait(host *h, uint64_t cycles);
-uint8_t host_status(host *h);
+uint8_t host_est(host *h, int eng);                /* status nibble of one engine */
 void host_ctrl(host *h, uint8_t run, uint8_t restart);
-void host_load(host *h, int core, const pe_prog *p, const int phys[PE_LPINS], uint16_t t0,
+void host_restart(host *h, int eng);               /* PC, registers, FIFOs, pins */
+void host_load(host *h, int eng, const pe_prog *p, const int phys[PE_LPINS], uint16_t t0,
                uint16_t t1);
-void host_write_tx(host *h, int core, uint8_t v);  /* no flow control       */
-void host_put(host *h, int core, uint8_t v);       /* waits for space       */
-uint8_t host_pop(host *h, int core);               /* caller saw RXNE       */
-int host_get(host *h, int core, uint8_t *v, uint64_t timeout);
+void host_write_tx(host *h, int eng, uint8_t v);   /* no flow control       */
+void host_put(host *h, int eng, uint8_t v);        /* waits for space       */
+uint8_t host_pop(host *h, int eng);                /* caller saw RXNE       */
+int host_get(host *h, int eng, uint8_t *v, uint64_t timeout);
 void host_clear_flags(host *h, int mask);
 
-/* stream tx[] into a core while collecting nrx bytes back */
-int host_stream(host *h, int core, const uint8_t *tx, int ntx, uint8_t *rx, int nrx,
+/* stream tx[] into an engine while collecting nrx bytes back */
+int host_stream(host *h, int eng, const uint8_t *tx, int ntx, uint8_t *rx, int nrx,
                 uint64_t timeout);
 
 #endif

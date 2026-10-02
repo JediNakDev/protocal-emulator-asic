@@ -44,8 +44,9 @@ Open the waveform in the Surfer VS Code extension, or a separately installed GTK
 
 ## C model of the protocol engine
 
-[model/](model/README.md) contains a cycle-accurate C model of the planned engine and its board.
-UART, SPI and I2C run there as engine programs, checked by models of real Pmod parts (USB-UART bridge, W25Q128JV flash, ADT7420 sensor).
+[model/](model/README.md) contains a cycle-accurate C model of the planned engine and its board: four engines at 40 MHz.
+UART, SPI and I2C, plus USB low-speed host and 10BASE-T transmit, run there as engine programs.
+They are checked by models of real parts (USB-UART bridge, W25Q128JV flash, ADT7420 sensor, USB keyboard, 10BASE-T receiver) against the pass criteria in [model/CRITERIA.md](model/CRITERIA.md).
 It fixes the instruction set, pin and timing rules, and resource budget the RTL must implement.
 Run it with `make model`.
 

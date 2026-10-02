@@ -1,5 +1,5 @@
 ; UART transmitter, 8N1, LSB first.
-; T0 = clk / baud (434 for 115200 at 50 MHz). The timer tick is the bit
+; T0 = clk / baud (347 for 115200 at 40 MHz). The timer tick is the bit
 ; clock, so every bit lasts exactly T0 cycles regardless of instruction count.
 .program uart_tx
 .pin tx 0

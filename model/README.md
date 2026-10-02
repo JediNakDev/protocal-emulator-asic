@@ -1,7 +1,8 @@
 # Protocol engine C model
 
 A cycle-accurate C model of the programmable protocol engine and the board it plugs into.
-UART, SPI and I2C run as **programs** on the engine, and peer models of real Pmod parts check them through the `uio` pins only.
+UART, SPI and I2C (required), plus USB low speed and 10BASE-T transmit (stretch goals), run as **programs** on the engine.
+Models of real parts check them through the `uio` pins only.
 The RTL does not exist yet.
 This model fixes the ISA, the pin and timing rules, and the resource budget the RTL must meet.
 
@@ -9,8 +10,21 @@ This model fixes the ISA, the pin and timing rules, and the resource budget the 
 make model          # from the repository root, or: make -C model test
 ```
 
-The suite runs in under a second and exits non-zero on any failure.
-Build with `-DPE_CLK_HZ=25000000.0` to rerun everything at another clock; all timing constants are derived from it.
+The suite reports every criterion in [CRITERIA.md](CRITERIA.md) as PASS or FAIL, and exits non-zero if any fails or is never exercised.
+It runs in about two seconds.
+
+## Design in one paragraph
+
+Four identical engines share eight `uio` pads, the host bus and nothing else.
+Each engine is a small timed bit mover: 32 instructions of 16 bits, 8-bit shift registers to and from 4-entry FIFOs, two 16-bit scratch registers, and one 16-bit timer.
+The RP2040 on the demo board does whatever needs no cycle-exact timing: framing, CRCs, USB NRZI and bit stuffing.
+Three features let the small instruction set cover all five protocols:
+
+- `[tick]` makes a bit last exactly one timer period.
+- **Edge re-phasing** restarts the timer on edges of a pin someone else drives (clock recovery).
+- `xch` plus a **differential OUT pin** shifts a bit out and in, or drives a complementary pair, in a single cycle.
+
+The clock is 40 MHz, the lowest rate that gives 10BASE-T an integer number of cycles (2) per half-bit.
 
 ## Files
 
@@ -18,171 +32,167 @@ Build with `-DPE_CLK_HZ=25000000.0` to rerun everything at another clock; all ti
 | --- | --- |
 | `pe.h` | Limits, instruction encoding, configuration and host-bus definitions, chip and board state |
 | `chip.c` | Engines (`core_step`), host bus, pad logic with 2-FF synchronisers |
-| `board.c` | Wire resolution with pull-ups, contention checks, cycle loop |
+| `board.c` | Wire resolution with pull-ups and pull-downs, contention checks, cycle loop |
 | `asm.c` | Two-pass assembler for `.pasm` sources |
 | `host.c` | RP2040 host model: bus transactions, program loader, FIFO streaming |
-| `peers.c` | USB-UART, W25Q128JV flash and ADT7420 sensor models, which also check protocol timing |
-| `programs/*.pasm` | The protocol firmware |
-| `test_main.c` | Test suite |
+| `proto.c` | CRC-5/16/32, USB line coding, Ethernet/IPv4/UDP framing (host side, checked against published values) |
+| `peers.c` | USB-UART bridge, W25Q128JV flash, ADT7420 sensor |
+| `peers_net.c` | USB low-speed keyboard, 10BASE-T receiver |
+| `programs/*.pasm` | Protocol firmware |
+| `test_main.c` | Test suite, organised by criterion |
 
 ## How the environment matches the hardware
 
 | Constraint | Model |
 | --- | --- |
 | `ui_in[8]` read-only, `uo_out[8]` write-only | Host bus only (see below) |
-| `uio[8]` with `out`, `oe`, `in` | Per-pad registered `out`/`oe`; inputs read back from the wire |
-| No open-drain pads | Per-logical-pin `od` bit: value 0 drives low (`oe=1, out=0`), value 1 releases (`oe=0`) |
-| External pull-ups | An undriven `uio` wire reads 1; two drivers fighting each other are reported as an error |
-| One clock | `PE_CLK_HZ`, 50 MHz by default |
+| `uio[8]` with `out`, `oe`, `in` | Per-pad registered `out`/`oe`; inputs are read back from the wire |
+| No open-drain pads | Per-logical-pin `od` bit: value 0 drives low, value 1 releases (`oe = 0`) |
+| External pulls | An undriven wire reads 1, or 0 where the board has a pull-down (USB D+). Opposing drivers are reported. |
+| One clock | 40 MHz |
 | 2-FF input synchronisers | Engines read `wire(t-2)`; the host bus is synchronised the same way |
 | Registered outputs | A pin written in cycle `t` changes on the wire in cycle `t+1` |
-| One write per pin per cycle | Writing a logical pin twice in one instruction (e.g. side-set and `set`) is an error, as is two engines driving one pad |
+| One write per pin per cycle | Writing a logical pin twice in one instruction is an error, as is two engines driving one pad |
 | Peer response time | Peers drive their reply one cycle after they observe an edge |
-| Instruction memory | 32 × 16-bit words per engine |
-| Registers | `X`, `Y` (8-bit scratch), `ISR`, `OSR` (8-bit shift with counters), one 16-bit timer |
-| FIFOs | 4 × 8-bit host→engine (TX) and 4 × 8-bit engine→host (RX) per engine |
-| Engines | 2 |
 | No C state in the hot path | `core_step()` keeps nothing across cycles outside `pe_core`; every field is a flip-flop |
 
 ### Cycle order
 
 ```
-cycle t: wire(t) = resolve(pads registered at t-1, peer drives set at t-1, pull-ups)
+cycle t: wire(t) = resolve(pads registered at t-1, peer drives set at t-1, pulls)
          peers observe wire(t), set their drive for t+1
          chip:   host command (if the synchronised strobe toggled)
                  each engine executes one cycle, reading uio = wire(t-2)
                  pad registers <- engine pin state            (visible at t+1)
 ```
 
-A peer's reply is therefore visible to an engine four cycles after the engine moved the pin: one cycle through the output register, one in the peer, and two in the synchroniser.
-In real time, this allows two clock periods (40 ns at 50 MHz) for the output pad, the peer's clock-to-output delay, the input pad and synchroniser setup.
-
 ## Instruction set
 
-Every instruction is 16 bits: `[15:13]` opcode, `[12:8]` delay/side-set, `[7:0]` arguments.
+Every instruction is 16 bits: `[15:13]` opcode, `[12]` side-set enable, `[11]` side-set value, `[10:8]` delay (0–6 cycles, or 7 = wait for the next timer tick), `[7:0]` arguments.
 An instruction takes one cycle plus its delay.
 
 | Opcode | Syntax | Effect |
 | --- | --- | --- |
-| 0 JMP | `jmp [cond] label` | cond: always, `!x`, `x--`, `!y`, `y--`, `pin`, `!pin`, `!osre`; `x--`/`y--` test non-zero, then decrement |
-| 1 WAIT | `wait 0\|1 pin p [resync]` | Stall until the synchronised pin matches. `resync` restarts the timer with T1 when the wait completes |
-| 2 IN | `in pins\|x\|y\|null\|isr\|osr, n` | Shift `n` bits into ISR; autopush at 8 |
-| 3 OUT | `out pins\|x\|y\|null\|pindirs\|pc\|isr, n` | Shift `n` bits out of OSR; autopull when OSR is empty |
+| 0 JMP | `jmp [cond] label` | cond: always, `!x`, `x--`, `!y`, `y--`, `pin`, `!pin`, `!osre`. `x--`/`y--` test for non-zero, then decrement. |
+| 1 WAIT | `wait 0\|1 pin p` | Stall until the synchronised pin matches |
+| 2 IN | `in pins\|x\|y\|null, n` | Shift `n` bits into ISR; autopush at 8 |
+| 3 OUT | `out pins\|x\|y\|null\|pindirs\|pc, n` | Shift `n` bits out of OSR. `out x, n` shifts into X (`X = X << n \| bits`), so two OUTs load 16 bits. |
 | 4 XCH | `xch [n]` | `out pins, n` and `in pins, n` in the same cycle |
-| 5 PUSH/PULL | `push [noblock]`, `pull [noblock]` | Explicit FIFO transfer; `push noblock` on a full FIFO sets the overflow flag |
-| 6 MOV | `mov dst, [~\|::]src` | dst: `pins x y pc isr osr`; src: `pins x y null isr osr`; invert or bit-reverse |
-| 7 SET | `set pin p, v`; `set pins\|pindirs\|x\|y\|flag\|timer, v` | 5-bit immediate; `set pins` skips the side-set pin; `set timer, 0\|1` restarts the timer with T0 or T1 |
-
-The delay/side-set field depends on the side-set mode set by `.side_set`:
-
-| Mode | Side-set | Delay values | `[tick]` code |
-| --- | --- | --- | --- |
-| none | — | 0–30 | 31 |
-| `.side_set p` | 1 bit, every instruction | 0–14 | 15 |
-| `.side_set p opt` | enable bit + 1 bit | 0–6 | 7 |
+| 5 PUSH/PULL | `push [noblock]`, `pull [noblock]` | Explicit FIFO transfer. `pull noblock` on an empty FIFO leaves the OSR alone, so `jmp !osre` can test for data. |
+| 6 MOV | `mov dst, [~]src` | dst: `pins x y pc isr osr`; src: `pins x y null isr osr`. Source `pins` reads all four logical pins. |
+| 7 SET | `set pin p, v`; `set pins\|pindirs\|x\|y\|flag\|timer, v` | 5-bit immediate. `set timer` restarts the timer with T0 or T1. |
 
 **Timer.**
 The 16-bit timer ticks every T0 cycles.
-`[tick]` holds the engine after an instruction until the next tick, so a protocol bit lasts exactly T0 cycles regardless of how many instructions it contains.
-`wait ... resync` and `set timer` re-phase the timer, giving edge-aligned sampling for receivers.
-The same mechanism would provide clock recovery for USB low speed.
+`[tick]` holds the engine after an instruction until the next tick, so a bit lasts exactly T0 cycles however many instructions it takes.
 
-**Stalls.**
-An instruction blocked by a FIFO (pull or autopull on an empty TX FIFO, push or autopush to a full RX FIFO) has no effect until it can complete, including its side-set.
-A blocked WAIT applies its side-set immediately, because the condition it waits for usually depends on it (for example, releasing SCL, then waiting for it to go high).
-SPI relies on this: a FIFO stall holds SCK high instead of corrupting the sample timing.
+**Edge re-phasing.**
+With `.resync rise|fall|both`, an edge on the JMP pin restarts the timer with T1, but only while this engine is not driving that pin.
+UART RX re-centres on every edge.
+I2C measures SCL high time from the moment a stretching target releases SCL.
+USB re-centres its sampling on every transition and ignores its own transmissions.
+
+**FIFO behaviour.**
+Autopull refills the OSR in the same cycle an OUT empties it, so byte boundaries add no gap (10BASE-T relies on this).
+If the FIFO is empty, the next OUT stalls.
+An instruction blocked by a FIFO has no effect, including its side-set, until it can complete.
+A blocked WAIT applies its side-set immediately, because the condition usually depends on it.
+
+**Differential OUT pin.**
+With `.out pin diff`, OUT and MOV to the out pin drive the inverse on the next logical pin in the same cycle.
+`set pins` still writes both pins independently, for USB SE0 and Ethernet idle.
 
 ### Configuration bytes (per engine)
 
 | Byte | Contents |
 | --- | --- |
-| 0–3 | Logical pin `i`: `[2:0]` uio pad, `[3]` open-drain emulation |
+| 0–3 | Logical pin `i`: `[2:0]` uio pad, `[3]` open-drain, `[4]` connected (unconnected pins read 0 and never drive) |
 | 4 | `[1:0]` OUT pin, `[3:2]` IN pin, `[5:4]` side-set pin, `[7:6]` JMP pin |
-| 5 | `[1:0]` side-set mode, `[2]` OUT LSB-first, `[3]` IN LSB-first, `[4]` autopull, `[5]` autopush |
+| 5 | `[0]` OUT LSB-first, `[1]` IN LSB-first, `[2]` autopull, `[3]` autopush, `[4]` differential OUT, `[6:5]` re-phase edge |
 | 6, 7 | Wrap bottom, wrap top |
 | 8–9, 10–11 | T0, T1 (little-endian) |
 | 12 | Entry PC after restart |
 
-The assembler produces bytes 4–7 and 12 and the open-drain bits.
-The host sets the pad mapping and T0/T1, so the same program runs on any pins at any rate.
+The assembler produces everything except the pad numbers and T0/T1, which the host chooses.
+The same program therefore runs on any pins at any rate.
 
 ## Host bus
 
 `ui_in[7]` is a toggle strobe, `ui_in[6:4]` a command and `ui_in[3:0]` a nibble.
 The host sets the command and nibble, then toggles the strobe in a later cycle.
-`uo_out` is a register that shows the last status or popped byte.
+`uo_out` shows the last status or popped byte.
 
 | Cmd | Name | Nibble | Effect |
 | --- | --- | --- | --- |
 | 0 | LO | data | Hold low nibble |
 | 1 | HI | data | `{nibble, hold}` to the selected target, then advance the pointer |
-| 2 | SEL | `[3:2]` 0 TX FIFO, 1 IMEM, 2 CFG; `[0]` engine | Select target, reset pointer |
-| 3 | CTRL | `[1:0]` run, `[3:2]` restart | Restart clears PC, registers, FIFOs, flags and pins |
-| 4 | POP | `[0]` engine | `uo_out` = RX FIFO head |
-| 5 | STAT | — | `uo_out` = status: per engine `[0]` RX not empty, `[1]` TX full, `[2]` idle, `[3]` flag |
+| 2 | SEL | `[3:2]` 0 TX FIFO, 1 IMEM, 2 CFG; `[1:0]` engine | Select target, reset pointer |
+| 3 | CTRL | run mask (restart mask = hold) | Restart clears PC, registers, FIFOs, flags and pins |
+| 4 | POP | `[1:0]` engine | `uo_out` = RX FIFO head |
+| 5 | STAT | `[0]` engine pair | `uo_out` = two status nibbles: `[0]` RX not empty, `[1]` TX full, `[2]` idle, `[3]` flag |
 | 6 | CLRF | engine mask | Clear sticky flags |
 
 With the RP2040 changing a pin every two chip cycles, a byte write takes 8 cycles and a status read or pop takes 7.
 
-## Protocols
+## Protocols at 40 MHz
 
-Default wiring on the TT demo board's `uio` Pmod: SPI on `uio[0..3]` (CS, MOSI, MISO, SCK, the standard Pmod SPI order), UART TX/RX on `uio[4]`/`uio[5]`, I2C SCL/SDA on `uio[6]`/`uio[7]`.
-The pin-remap test runs the same programs on other pads.
-
-| Program | Words | Rate at 50 MHz | Host framing |
+| Program | Words | Rate | Host framing |
 | --- | --- | --- | --- |
-| `uart_tx` | 8 | 115 207 baud (T0 = 434) | One byte per frame |
-| `uart_rx` | 11 | Same; tolerates ±4% baud error | One byte per frame; framing error sets the flag and drops the byte |
-| `spi_master` | 13 | SCK 12.5 MHz (clk/4), mode 0, MSB first, no inter-byte gap | `[n-1]` then `n` bytes; `n` bytes come back; CS spans the frame |
-| `spi_div6` | 13 | SCK 8.33 MHz (clk/6); otherwise identical | Same |
-| `i2c_master` | 27 | SCL 400.0 kHz (T0 = 75, T1 = 46), clock stretching | Command byte `[7]` ACK out, `[6:5]` op (0 START, 1 STOP, 2 XFER); XFER takes a data byte (0xFF to read) and returns the data and ACK bytes |
+| `uart_tx` | 8 | 115 274 baud (T0 = 347, +0.06%) | One byte per frame |
+| `uart_rx` | 11 | Same; tested with a sender at ±3% | One byte per frame; a framing error sets the flag and drops the byte |
+| `spi_master` | 14 | SCK 10 MHz (clk/4), mode 0, no inter-byte gap | `n-1` as two bytes, then `n` bytes; `n` bytes come back; CS spans the frame |
+| `spi_div6` | 14 | SCK 6.67 MHz (clk/6); tolerates slower targets | Same |
+| `i2c_master` | 27 | SCL 400 kHz (T0 = 60, T1 = 36), clock stretching | Command byte `[7]` ACK out, `[6:5]` op (0 START, 1 STOP, 2 XFER). XFER takes a data byte (0xFF to read) and returns the data and ACK bytes. |
+| `usb_ls_host` | 26 | 1.481 Mb/s (T0 = 27, −1.2%); EOP, turnaround, edge-tracking receive | Line states after NRZI and stuffing, with a 15-bit count and a "listen" bit; the reply comes back as D+ samples with an end marker |
+| `eth10_tx` | 23 | 10 Mb/s Manchester, link pulses, TP_IDL, interframe gap | Bit count, then the frame bytes (preamble to FCS) |
 
-Peers, chosen from parts that can be plugged into the board's Pmod header after fabrication:
+Default wiring on the TT demo board's `uio` Pmod:
 
-- **USB-UART bridge** (e.g. Digilent Pmod USBUART): checks every edge against the bit grid, can transmit with a baud-rate error, can send a bad stop bit, and can echo.
-- **Winbond W25Q128JV**: JEDEC ID, read, fast read, WREN/WRDI, status, page program and sector erase with busy times. It checks the mode, SCK timing and that MOSI is stable at SCK rising edges.
-- **ADT7420** (Digilent Pmod TMP2) at 0x48: register pointer, read-only registers, ID 0xCB, optional clock stretching. It checks the Fast-mode timing limits of UM10204.
+- SPI: `uio[0..3]` = CS, MOSI, MISO, SCK.
+- UART: `uio[4]` = TX, `uio[5]` = RX.
+- I2C: `uio[6]` = SCL, `uio[7]` = SDA.
+- USB: D+/D− on `uio[0]`/`uio[1]`, with a 15 kΩ pull-down on D+.
+- Ethernet: TD+/TD− on `uio[2]`/`uio[3]`, through resistors to an RJ45 jack with built-in magnetics.
 
-## Results
+Every program runs on any pad; the remap test proves it.
 
-| Test | Result |
+Peers, chosen from parts that can be plugged in after fabrication:
+
+- **USB-UART bridge** (e.g. Pmod USBUART): checks every edge against the bit grid, can transmit off-rate, can send a bad stop bit, and can echo.
+- **W25Q128JV**: JEDEC ID, read, fast read, WREN/WRDI, status, page program and erase with busy times. It checks the mode, the SCK timing and MOSI setup, and can delay MISO.
+- **ADT7420** (Pmod TMP2): register pointer, ID 0xCB, clock stretching. It checks every UM10204 Fast-mode limit.
+- **USB low-speed keyboard**: decodes NRZI, bit stuffing, PIDs, CRC5 and CRC16, and recovers its clock on edges. It answers GET_DESCRIPTOR and SET_ADDRESS, gives HID reports with data toggles, and NAKs when idle. It runs with ±1.5% clock error, ignores bad CRCs, and checks EOP width, bit rate and handshake timing.
+- **10BASE-T receiver**: requires exact 50 ns half-bits and a mid-bit transition in every bit. It checks preamble, SFD, FCS, TP_IDL, interframe gap, and link pulse width and spacing.
+
+## Results (all 37 criteria pass)
+
+| Area | Measured |
 | --- | --- |
-| Reset | All `uio` pads are inputs |
-| UART TX | 48 bytes back-to-back; every edge on the 434-cycle grid (0 cycles error) |
-| UART RX | ±3% tested in CI; a sweep passes ±4% and fails at ±5% |
-| UART framing | Bad stop bit sets the flag, the byte is dropped, and the next byte arrives |
-| UART full duplex | Two engines, 64 bytes echoed through the peer at +1% baud error |
-| SPI | JEDEC ID `EF 40 18`; 252-byte read, fast read, page program with status polling and read-back. SCK period is 4 cycles throughout a 256-byte frame (no gaps): 1.55 MB/s including host traffic |
-| I2C | ID 0xCB, temperature 25.0 °C, 2-byte register write and read-back, repeated START, NACK from an absent address. All Fast-mode minimums met: tLOW 1.50 µs, tHIGH 1.00 µs, tSU;DAT 1.26 µs, tBUF 3.94 µs |
-| I2C, stretching | Same, with the target holding SCL for 10 µs after every ACK |
-| SPI margin | `spi_master` reads correctly only when MISO arrives with no extra delay; `spi_div6` tolerates 2 extra cycles |
-| Reprogramming | One engine reloaded from UART TX to SPI while the other runs I2C |
-| Pin remap | UART TX on `uio[7]`, SPI with MOSI and MISO pads swapped |
-| Checker sanity | Two engines driving one pad is reported. Removing `resync` from the I2C program makes the stretching test fail (tHIGH 0.48 µs) |
+| UART | 48 bytes, edges exactly on the 347-cycle grid, 3470 cycles per back-to-back frame; RX at ±3%; framing error flagged; 64-byte full-duplex echo |
+| SPI | JEDEC `EF 40 18`, 252-byte read, fast read, page program + polling + read-back; SCK 10 MHz with no gaps across a 256-byte frame (1.24 MB/s including host traffic) |
+| SPI margin | `spi_master` needs MISO within one clock of the SCK edge reaching the pin. `spi_div6` tolerates two more clocks. |
+| I2C | 400.0 kHz. tLOW 1.50 µs, tHIGH 1.00 µs, tSU;DAT 1.2 µs, tHD;STA 1.50 µs, tSU;STA 1.00 µs, tSU;STO 1.00 µs, tBUF 4.50 µs; the same with a target stretching 10 µs per ACK. |
+| USB | Device descriptor, SET_ADDRESS, NAK, two HID reports with DATA0/DATA1. Host at −1.23% (limit ±1.5%), EOP 1.35 µs (limit 1.25–1.50 µs), handshake 3.7–3.9 bit times after the device EOP (limit 2–7.5). Keyboard clock at ±1.5%; recovery from a bad-CRC packet. |
+| Ethernet | 4 UDP frames with valid FCS and IP checksums, including a 1518-byte frame streamed from the host. Half-bits exactly 50 ns, TP_IDL 300 ns, interframe gap ≥ 12.1 µs, link pulses 100 ns every 14.7 ms. |
+| Concurrency | UART TX, UART RX, SPI and I2C correct on four engines at once |
+| Checker sanity | Removing edge re-phasing from UART RX, I2C or USB fails U4, I4 or K4–K8. A 3-cycle Ethernet half-bit fails E1/E2, a short EOP fails K3, a short interframe gap fails E4, a short TP_IDL fails E3, two stop bits fail U3. |
 
-## Findings for the RTL
+## State budget
 
-- **State budget.**
-  Per engine: 512 bits of instruction memory, about 100 configuration bits, 78 FIFO bits and about 80 register bits, roughly 770 flip-flops.
-  Two engines plus the host interface come to about 1 600 flip-flops, of which 1 024 are instruction memory.
-  Use the GDS flow to decide whether a latch array or an SRAM macro is needed before increasing memory.
-- **Instruction memory.**
-  32 words is enough: the largest program (I2C) uses 27.
-  JMP and SET make up half of all instructions; XCH and the `[tick]` delay code are what make SPI and UART/I2C fit.
-- **SPI round trip.**
-  At clk/4, MISO for bit k is sampled on the cycle SCK falls for bit k+1, which leaves two cycles (40 ns) between SCK leaving the chip and MISO reaching the synchroniser.
-  The margin test confirms it: one extra cycle of target delay breaks clk/4 reads, while `spi_div6` (one more cycle per SCK phase, 8.33 MHz) tolerates two.
-  Check the CMOS5L pad delays against this budget before committing to 12.5 MHz.
-- **Edge re-phasing.**
-  Without re-phasing the timer on the observed SCL edge, clock stretching shortens tHIGH below the specification. `resync` is required, not optional.
-- **Host bandwidth.**
-  An RP2040 changing a pin every two chip cycles keeps a 12.5 MHz SPI stream gap-free with 4-entry FIFOs.
-  A slower host stretches SCK high between bytes, which SPI permits.
+| Per engine | Bits |
+| --- | --- |
+| Instruction memory (32 × 16) | 512 |
+| Configuration (pin map 20, roles 8, mode 7, wrap 10, T0/T1 32, entry 5) | 82 |
+| FIFOs (2 × 4 × 8 + pointers) | 78 |
+| Registers (PC 5, X/Y 32, ISR/OSR 24, timer 16, delay 4, pins 8, re-phase 1, flags/run/stall 4) | 94 |
+
+Four engines plus the host interface (72) come to about 3,140 bits: 2,048 in instruction memory, which can be a latch array, and about 1,100 flip-flops.
+That is an estimated 30–35% of the 6×4 area.
+The GDS flow has to confirm this.
 
 ## Limitations
 
-- Pad speeds and voltages are sky130 figures; confirm them for IHP CMOS5L in the template.
-- The model does not cover metastability or analog edge rates (open-drain rise time is treated as one cycle).
-- Engines do not arbitrate on I2C; the controller supports a single master.
-- Writing instruction memory while an engine runs takes effect immediately; stop the engine first.
-- USB and Ethernet are not implemented.
+- Ethernet is transmit-only: receiving needs an analog front end and more oversampling than a 40 MHz single-edge clock gives.
+- USB is the host role at low speed. The RP2040 does NRZI, stuffing and CRC, and its response time is part of the measured handshake timing.
+- Pad speeds and voltages need confirming for IHP CMOS5L. SPI at clk/4 needs MISO within 50 ns of SCK leaving the chip; use `spi_div6` otherwise.
+- No metastability or analog edge-rate modelling; I2C is single-master; write the instruction memory only while an engine is stopped.

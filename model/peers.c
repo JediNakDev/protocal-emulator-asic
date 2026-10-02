@@ -42,7 +42,10 @@ static void uart_step(peer *pp, board *b, uint8_t wire) {
         } else if (u->rbit == 9) {
           if (!v) u->ferr++;
           else {
-            if (u->nrx < (int)sizeof u->rx) u->rx[u->nrx++] = u->rbyte;
+            if (u->nrx < (int)sizeof u->rx) {
+              u->starts[u->nrx] = u->rstart;
+              u->rx[u->nrx++] = u->rbyte;
+            }
             if (u->echo) uart_peer_send(u, u->rbyte, false);
           }
           u->rst = 0;

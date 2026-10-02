@@ -4,8 +4,10 @@
  *   uart_peer   - 3.3 V USB-UART bridge (e.g. Digilent Pmod USBUART, FT232R)
  *   spi_flash   - Winbond W25Q128JV serial NOR flash (JEDEC ID EF 40 18)
  *   i2c_adt7420 - Analog Devices ADT7420 temperature sensor (Digilent Pmod TMP2)
+ *   usb_kbd     - USB low-speed HID keyboard (any USB 1.1 keyboard)
+ *   eth_rx      - 10BASE-T receiver (a PC NIC behind an RJ45 MagJack)
  *
- * Peers react one cycle after they observe a pin change (20 ns at 50 MHz,
+ * Peers react one cycle after they observe a pin change (25 ns at 40 MHz,
  * i.e. clock-to-output plus pad delay) and also act as protocol checkers.
  *
  * SPDX-License-Identifier: Apache-2.0
@@ -27,6 +29,7 @@ typedef struct {
   uint64_t rstart;
   uint8_t rbyte, rprev;
   uint8_t rx[1024];
+  uint64_t starts[1024]; /* start-bit edge of each received frame */
   int nrx, ferr;
   double max_dev;       /* worst edge deviation from the ideal bit grid    */
   /* transmitter: bit 8 of a queue entry forces a bad stop bit */
@@ -88,5 +91,50 @@ typedef struct {
 } i2c_adt7420;
 
 void i2c_adt7420_init(i2c_adt7420 *d, int scl, int sda, uint8_t addr);
+
+typedef struct {
+  peer base;
+  int dp, dm;
+  double tbit;          /* device transmit bit period (cycles)             */
+  int resp_bits;        /* bus turnaround before replying (bit times)      */
+  int st, pline;
+  double next_s;
+  uint64_t first_edge, se0_t, tx_at, eop_end, ack_deadline;
+  double tx_t0;
+  uint8_t raw[1024], tx[1024];
+  int nraw, ntx;
+  /* device state */
+  uint8_t addr, new_addr;
+  bool addr_pend, ep0_status, report_ready, expect_ack, want_ipd;
+  int tok_pid, tok_ep, ep0_len, ep0_off, ep0_tog, ep1_tog, pend, pend_len;
+  uint8_t ep0[64], report[8];
+  /* checks */
+  double max_rate_err, min_ipd, max_ipd;
+  int min_eop, max_eop;
+  int pkts, bad_crc, bad_coding, ignored, acks, naks, ack_timeouts, setups, reports;
+} usb_kbd;
+
+void usb_kbd_init(usb_kbd *k, int dp, int dm, double clock_err);
+void usb_kbd_press(usb_kbd *k, const uint8_t report[8]);
+
+#define ETH_MAXF 8
+typedef struct {
+  peer base;
+  int tdp, tdm;
+  int prev;
+  bool in_frame, in_pulse;
+  int8_t *lev;
+  int nlev;
+  uint64_t pstart, last_nlp, last_end;
+  int nlps, nlp_wmin, nlp_wmax;
+  uint64_t nlp_gmin, nlp_gmax;
+  int ifg_min, tpidl_min, tpidl_max;
+  uint8_t frame[ETH_MAXF][1600];
+  int flen[ETH_MAXF], nframes;
+  int bad_manch, bad_pre, bad_fcs, bad_len, odd_bits;
+} eth_rx;
+
+void eth_rx_init(eth_rx *e, int tdp, int tdm);
+void eth_rx_free(eth_rx *e);
 
 #endif

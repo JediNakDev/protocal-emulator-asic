@@ -1,5 +1,5 @@
 /*
- * Board model: uio wires with external pull-ups, peers on the Pmod headers,
+ * Board model: uio wires with external pull-ups/downs, peers on the Pmod headers,
  * and the RP2040-side synchroniser on uo_out.
  *
  * Cycle t:  wire(t) = resolve(chip pads registered at t-1, peer drives from t-1)
@@ -45,8 +45,9 @@ void board_step(board *b) {
     low |= pl;
     high |= ph;
   }
-  /* push-pull high against another push-pull high is fine; undriven pulls up */
-  b->wire = (uint8_t)~low;
+  /* driven pads take the driven level; undriven pads follow their pull */
+  uint8_t undriven = (uint8_t)~(low | high);
+  b->wire = (uint8_t)(high | (undriven & ~b->pulldown));
 
   for (int i = 0; i < b->npeers; i++) b->peers[i]->step(b->peers[i], b, b->wire);
 

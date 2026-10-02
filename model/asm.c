@@ -1,13 +1,13 @@
 /*
  * Two-pass assembler for the protocol engine (.pasm, PIO-like syntax).
  *
- *   .program name            .pin name idx [od]       .side_set pin [opt]
- *   .out pin  .in pin  .jmp_pin pin                    .shift out|in left|right
- *   .autopull  .autopush     .wrap_target  .wrap  .entry
+ *   .program name            .pin name idx [od]       .side_set pin
+ *   .out pin [diff]  .in pin  .jmp_pin pin              .shift out|in left|right
+ *   .autopull  .autopush     .resync rise|fall|both     .wrap_target  .wrap  .entry
  *
  *   jmp [!x|x--|!y|y--|pin|!pin|!osre] label
- *   wait 0|1 pin name [resync]      in src, n      out dst, n      xch [n]
- *   push [noblock]   pull [noblock]   mov dst, [~|::]src   nop
+ *   wait 0|1 pin name        in pins|x|y|null, n       out pins|x|y|null|pindirs|pc, n
+ *   xch [n]   push [noblock]   pull [noblock]   mov dst, [~]src   nop
  *   set pin name, v | pins, v | pindirs, v | x, v | y, v | flag, v | timer, 0|1
  *   modifiers: side v   [n]   [tick]
  *
@@ -34,7 +34,7 @@ typedef struct {
   int labaddr[64], nlab;
   src_line ins[PE_IMEM + 1];
   int nins;
-  int smode, sidep, outp, inp, jmpp, out_r, in_r, apull, apush, wbot, wtop, entry;
+  int has_side, sidep, outp, inp, jmpp, out_r, in_r, apull, apush, diff, resync, wbot, wtop, entry;
   int have_wrap;
   char *err;
   int errlen;
@@ -96,12 +96,17 @@ static int directive(asm_ctx *a, src_line *l) {
   } else if (!strcmp(d, ".pin") && l->n >= 3) {
     if (parse_num(l->tok[2], &v) || v < 0 || v >= PE_LPINS) return fail(a, l->line, "bad pin index", l->tok[2]);
     snprintf(a->p->pin[v], sizeof a->p->pin[v], "%s", l->tok[1]);
-    if (l->n >= 4 && !strcmp(l->tok[3], "od")) a->p->cfg[CFG_PMAP0 + v] |= 8;
+    a->p->cfg[CFG_PMAP0 + v] |= PMAP_EN;
+    if (l->n >= 4 && !strcmp(l->tok[3], "od")) a->p->cfg[CFG_PMAP0 + v] |= PMAP_OD;
   } else if (!strcmp(d, ".side_set") && l->n >= 2) {
     if ((a->sidep = pin_idx(a, l->tok[1])) < 0) return fail(a, l->line, "unknown pin", l->tok[1]);
-    a->smode = (l->n >= 3 && !strcmp(l->tok[2], "opt")) ? SIDE_OPT : SIDE_ON;
+    a->has_side = 1;
   } else if (!strcmp(d, ".out") && l->n >= 2) {
     if ((a->outp = pin_idx(a, l->tok[1])) < 0) return fail(a, l->line, "unknown pin", l->tok[1]);
+    if (l->n >= 3 && !strcmp(l->tok[2], "diff")) a->diff = 1;
+  } else if (!strcmp(d, ".resync") && l->n >= 2) {
+    a->resync = !strcmp(l->tok[1], "rise") ? 1 : !strcmp(l->tok[1], "fall") ? 2 : !strcmp(l->tok[1], "both") ? 3 : -1;
+    if (a->resync < 0) return fail(a, l->line, "resync takes rise, fall or both", l->tok[1]);
   } else if (!strcmp(d, ".in") && l->n >= 2) {
     if ((a->inp = pin_idx(a, l->tok[1])) < 0) return fail(a, l->line, "unknown pin", l->tok[1]);
   } else if (!strcmp(d, ".jmp_pin") && l->n >= 2) {
@@ -148,20 +153,10 @@ static int encode(asm_ctx *a, src_line *l, uint16_t *out) {
     }
   }
 
-  /* delay / side-set field */
-  int field;
-  int maxd = a->smode == SIDE_NONE ? 30 : a->smode == SIDE_ON ? 14 : 6;
-  if (dly > maxd) return fail(a, l->line, "delay too large for side-set mode", NULL);
-  int d = tick ? maxd + 1 : dly;
-  if (a->smode == SIDE_NONE) {
-    if (side >= 0) return fail(a, l->line, "side without .side_set", NULL);
-    field = d;
-  } else if (a->smode == SIDE_ON) {
-    if (side < 0) return fail(a, l->line, "side-set is mandatory in this program", NULL);
-    field = (side & 1) << 4 | d;
-  } else {
-    field = (side >= 0 ? 16 | (side & 1) << 3 : 0) | d;
-  }
+  /* delay / side-set field: [4] side enable, [3] side value, [2:0] delay */
+  if (dly < 0 || dly > 6) return fail(a, l->line, "delay must be 0..6 or tick", NULL);
+  if (side >= 0 && !a->has_side) return fail(a, l->line, "side without .side_set", NULL);
+  int field = (side >= 0 ? 16 | (side & 1) << 3 : 0) | (tick ? DLY_TICK : dly);
 
   int op, arg = 0, v;
   const char *m = t[0];
@@ -191,16 +186,15 @@ static int encode(asm_ctx *a, src_line *l, uint16_t *out) {
     int p = pin_idx(a, t[3]);
     if (p < 0) return fail(a, l->line, "unknown pin", t[3]);
     arg = (v & 1) << 7 | p;
-    if (n >= 5 && !strcmp(t[4], "resync")) arg |= 0x40;
   } else if (!strcmp(m, "in") || !strcmp(m, "out")) {
     int isin = m[0] == 'i';
     op = isin ? OP_IN : OP_OUT;
     if (n != 3 || parse_num(t[2], &v) || v < 1 || v > 8) return fail(a, l->line, "in/out syntax", NULL);
-    static const char *sn[] = {"pins", "x", "y", "null", "pindirs", "pc", "isr", "osr"};
+    static const char *sn[] = {"pins", "x", "y", "null", "pindirs", "pc"};
     int s = -1;
-    for (int i = 0; i < 8; i++)
+    for (int i = 0; i < 6; i++)
       if (!strcmp(t[1], sn[i])) s = i;
-    if (s < 0 || (isin && (s == 4 || s == 5)) || (!isin && s == 7))
+    if (s < 0 || (isin && s >= 4))
       return fail(a, l->line, "bad in/out operand", t[1]);
     arg = s << 5 | (v & 7);
   } else if (!strcmp(m, "xch")) {
@@ -217,16 +211,15 @@ static int encode(asm_ctx *a, src_line *l, uint16_t *out) {
     if (n != 3) return fail(a, l->line, "mov syntax", NULL);
     static const char *mn[] = {"pins", "x", "y", "null", "", "pc", "isr", "osr"};
     const char *s = t[2];
-    int mop = MOP_NONE;
-    if (s[0] == '~' || s[0] == '!') { mop = MOP_INV; s++; }
-    else if (s[0] == ':' && s[1] == ':') { mop = MOP_REV; s += 2; }
+    int inv = 0;
+    if (s[0] == '~' || s[0] == '!') { inv = 1; s++; }
     int ds = -1, ss = -1;
     for (int i = 0; i < 8; i++) {
       if (mn[i][0] && !strcmp(t[1], mn[i])) ds = i;
       if (mn[i][0] && !strcmp(s, mn[i])) ss = i;
     }
     if (ds < 0 || ss < 0 || ss == MV_PC) return fail(a, l->line, "bad mov operand", NULL);
-    arg = ds << 5 | mop << 3 | ss;
+    arg = ds << 5 | inv << 3 | ss;
   } else if (!strcmp(m, "set")) {
     op = OP_SET;
     if (n >= 4 && !strcmp(t[1], "pin")) {
@@ -300,7 +293,9 @@ int pe_assemble(const char *src, pe_prog *p, char *err, int errlen) {
     p->len = a->nins;
     if (!a->have_wrap) a->wtop = a->nins - 1;
     p->cfg[CFG_PINSEL] = (uint8_t)(a->outp | a->inp << 2 | a->sidep << 4 | a->jmpp << 6);
-    p->cfg[CFG_MODE] = (uint8_t)(a->smode | a->out_r << 2 | a->in_r << 3 | a->apull << 4 | a->apush << 5);
+    p->cfg[CFG_MODE] = (uint8_t)((a->out_r ? MODE_OUT_R : 0) | (a->in_r ? MODE_IN_R : 0) |
+                                 (a->apull ? MODE_APULL : 0) | (a->apush ? MODE_APUSH : 0) |
+                                 (a->diff ? MODE_DIFF : 0) | a->resync << MODE_RS_SHIFT);
     p->cfg[CFG_WRAP_BOT] = (uint8_t)a->wbot;
     p->cfg[CFG_WRAP_TOP] = (uint8_t)a->wtop;
     p->cfg[CFG_ENTRY] = (uint8_t)a->entry;
@@ -325,14 +320,4 @@ int pe_assemble_file(const char *path, pe_prog *p) {
     return -1;
   }
   return 0;
-}
-
-void pe_disasm(const pe_prog *p, uint16_t w, char *buf, int len) {
-  static const char *opn[] = {"jmp", "wait", "in", "out", "xch", "push/pull", "mov", "set"};
-  int smode = p->cfg[CFG_MODE] & 3, f = (w >> 8) & 31;
-  char sd[32] = "";
-  if (smode == SIDE_ON) snprintf(sd, sizeof sd, " side %d [%s%d]", f >> 4, (f & 15) == 15 ? "tick:" : "", f & 15);
-  else if (smode == SIDE_OPT && (f & 16)) snprintf(sd, sizeof sd, " side %d [%d]", (f >> 3) & 1, f & 7);
-  else snprintf(sd, sizeof sd, " [%d]", smode == SIDE_OPT ? f & 7 : f);
-  snprintf(buf, (size_t)len, "%-9s arg=0x%02x%s", opn[w >> 13], w & 0xff, sd);
 }

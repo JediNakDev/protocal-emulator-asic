@@ -1,15 +1,17 @@
 ; UART receiver, 8N1, LSB first.
-; T0 = clk / baud, T1 = T0/2 - 1 (first tick lands mid start bit).
-; "wait ... resync" restarts the timer on the start edge: clock recovery.
+; T0 = clk / baud, T1 = T0/2 - 1. The timer re-phases on every RX edge, so
+; each tick lands mid-bit: the start edge aligns the frame and every data
+; edge corrects drift.
 ; Framing errors set the user flag and drop the byte; overflow sets FLAG_OVF.
 .program uart_rx
 .pin rx 0
 .in rx
 .jmp_pin rx
+.resync both
 .shift in right
 .wrap_target
 start:
-    wait 0 pin rx resync [tick] ; start edge, then to mid start bit
+    wait 0 pin rx   [tick]      ; start edge, then to mid start bit
     jmp pin start               ; glitch: line went back high
     set x, 7        [tick]      ; to mid bit 0
 bit:

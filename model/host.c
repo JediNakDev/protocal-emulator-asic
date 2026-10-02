@@ -41,23 +41,26 @@ static void wbyte(host *h, uint8_t v) {
   nib(h, HC_HI, v >> 4);
 }
 
-uint8_t host_status(host *h) {
-  nib(h, HC_STAT, 0);
+uint8_t host_est(host *h, int eng) {
+  nib(h, HC_STAT, eng >> 1);
   board_run(h->b, HOST_LAT);
-  return h->b->host_q2;
+  return (uint8_t)((h->b->host_q2 >> (4 * (eng & 1))) & 15);
 }
 
 void host_ctrl(host *h, uint8_t run, uint8_t restart) {
-  h->run = run;
-  nib(h, HC_CTRL, (restart & 3) << 2 | (run & 3));
+  h->run = run & 15;
+  nib(h, HC_LO, restart & 15);
+  nib(h, HC_CTRL, run & 15);
 }
 
-void host_clear_flags(host *h, int mask) { nib(h, HC_CLRF, mask & 3); }
+void host_restart(host *h, int eng) { host_ctrl(h, h->run, (uint8_t)(1 << eng)); }
 
-void host_load(host *h, int core, const pe_prog *p, const int phys[PE_LPINS], uint16_t t0,
+void host_clear_flags(host *h, int mask) { nib(h, HC_CLRF, mask & 15); }
+
+void host_load(host *h, int eng, const pe_prog *p, const int phys[PE_LPINS], uint16_t t0,
                uint16_t t1) {
-  host_ctrl(h, (uint8_t)(h->run & ~(1 << core)), 0);
-  nib(h, HC_SEL, SEL_IMEM | core);
+  host_ctrl(h, (uint8_t)(h->run & ~(1 << eng)), 0);
+  nib(h, HC_SEL, SEL_IMEM | eng);
   for (int i = 0; i < PE_IMEM; i++) {
     uint16_t w = i < p->len ? p->code[i] : 0;
     wbyte(h, w & 0xff);
@@ -65,57 +68,58 @@ void host_load(host *h, int core, const pe_prog *p, const int phys[PE_LPINS], ui
   }
   uint8_t cfg[PE_CFG_BYTES];
   for (int i = 0; i < PE_CFG_BYTES; i++) cfg[i] = p->cfg[i];
-  for (int i = 0; i < PE_LPINS; i++) cfg[CFG_PMAP0 + i] = (uint8_t)((p->cfg[CFG_PMAP0 + i] & 8) | (phys[i] & 7));
+  for (int i = 0; i < PE_LPINS; i++)
+    cfg[CFG_PMAP0 + i] = (uint8_t)((p->cfg[CFG_PMAP0 + i] & (PMAP_OD | PMAP_EN)) | (phys[i] & 7));
   cfg[CFG_T0] = t0 & 0xff;
   cfg[CFG_T0 + 1] = t0 >> 8;
   cfg[CFG_T1] = t1 & 0xff;
   cfg[CFG_T1 + 1] = t1 >> 8;
-  nib(h, HC_SEL, SEL_CFG | core);
+  nib(h, HC_SEL, SEL_CFG | eng);
   for (int i = 0; i < PE_CFG_BYTES; i++) wbyte(h, cfg[i]);
   h->sel = -1;
-  host_ctrl(h, (uint8_t)(h->run | 1 << core), (uint8_t)(1 << core));
+  host_ctrl(h, (uint8_t)(h->run | 1 << eng), (uint8_t)(1 << eng));
 }
 
-void host_write_tx(host *h, int core, uint8_t v) {
-  sel(h, SEL_TX | core);
+void host_write_tx(host *h, int eng, uint8_t v) {
+  sel(h, SEL_TX | eng);
   wbyte(h, v);
 }
 
-void host_put(host *h, int core, uint8_t v) {
-  while ((host_status(h) >> (4 * core)) & ST_TXFULL) {
+void host_put(host *h, int eng, uint8_t v) {
+  while (host_est(h, eng) & ST_TXFULL) {
   }
-  host_write_tx(h, core, v);
+  host_write_tx(h, eng, v);
 }
 
-uint8_t host_pop(host *h, int core) {
-  nib(h, HC_POP, core);
+uint8_t host_pop(host *h, int eng) {
+  nib(h, HC_POP, eng);
   board_run(h->b, HOST_LAT);
   return h->b->host_q2;
 }
 
-int host_get(host *h, int core, uint8_t *v, uint64_t timeout) {
+int host_get(host *h, int eng, uint8_t *v, uint64_t timeout) {
   uint64_t end = h->b->cycle + timeout;
   while (h->b->cycle < end) {
-    if ((host_status(h) >> (4 * core)) & ST_RXNE) {
-      *v = host_pop(h, core);
+    if (host_est(h, eng) & ST_RXNE) {
+      *v = host_pop(h, eng);
       return 1;
     }
   }
   return 0;
 }
 
-int host_stream(host *h, int core, const uint8_t *tx, int ntx, uint8_t *rx, int nrx,
+int host_stream(host *h, int eng, const uint8_t *tx, int ntx, uint8_t *rx, int nrx,
                 uint64_t timeout) {
   int sent = 0, got = 0;
   uint64_t end = h->b->cycle + timeout;
   while ((sent < ntx || got < nrx) && h->b->cycle < end) {
-    uint8_t s = (uint8_t)(host_status(h) >> (4 * core));
+    uint8_t s = host_est(h, eng);
     if (got < nrx && (s & ST_RXNE)) {
-      uint8_t v = host_pop(h, core);
+      uint8_t v = host_pop(h, eng);
       if (rx) rx[got] = v;
       got++;
     }
-    if (sent < ntx && !(s & ST_TXFULL)) host_write_tx(h, core, tx[sent++]);
+    if (sent < ntx && !(s & ST_TXFULL)) host_write_tx(h, eng, tx[sent++]);
   }
   return got == nrx && sent == ntx;
 }
