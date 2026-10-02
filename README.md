@@ -42,6 +42,13 @@ make clean  # Remove simulation outputs
 Simulation saves the waveform to `test/tb.fst` and the JUnit report to `test/results.xml`.
 Open the waveform in the Surfer VS Code extension, or a separately installed GTKWave.
 
+## C model of the protocol engine
+
+[model/](model/README.md) contains a cycle-accurate C model of the planned engine and its board.
+UART, SPI and I2C run there as engine programs, checked by models of real Pmod parts (USB-UART bridge, W25Q128JV flash, ADT7420 sensor).
+It fixes the instruction set, pin and timing rules, and resource budget the RTL must implement.
+Run it with `make model`.
+
 ## Where to work
 
 - [src/project.v](src/project.v): Tiny Tapeout top-level wrapper and starter RTL.

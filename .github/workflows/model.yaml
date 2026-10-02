@@ -1,0 +1,16 @@
+name: model
+on: [push, workflow_dispatch]
+jobs:
+  model:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: Build and run the C protocol model at 50 MHz
+        run: make model
+
+      - name: Run the C protocol model at 25 MHz
+        run: |
+          make -C model clean
+          make -C model test CFLAGS="-O2 -std=c11 -Wall -Wextra -Werror -DPE_CLK_HZ=25000000.0"
