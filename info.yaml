@@ -1,17 +1,17 @@
 # Tiny Tapeout project information
 project:
-  title:        ""      # Project title
-  author:       ""      # Your name
+  title:        "Programmable Protocol Emulator"
+  author:       "JediNakDev" # Replace with your preferred name before submission
   discord:      ""      # Your discord username, for communication and automatically assigning you a Tapeout role (optional)
-  description:  ""      # One line description of what your project does
+  description:  "Development scaffold for a programmable protocol emulator"
   language:     "Verilog" # other examples include SystemVerilog, Amaranth, VHDL, etc
-  clock_hz:     0       # Clock frequency in Hz (or 0 if not applicable)
+  clock_hz:     50000000 # Initial target, matching CLOCK_PERIOD=20ns in src/config.json
 
-  # How many tiles your design occupies? A single tile is about 167x108 uM.
-  tiles: "1x1"          # Valid values: 1x1, 1x2, 2x2, 3x2, 4x2, 6x2 or 8x2
+  # Competition allocation: 24 tiles on IHP's 130nm CMOS5L process.
+  tiles: "6x4"
 
   # Your top module name must start with "tt_um_". Make it unique by including your github username:
-  top_module:  "tt_um_example"
+  top_module:  "tt_um_jedinakdev_protocol_emulator"
 
   # List your project's source files here.
   # Source files must be in ./src and you must list each source file separately, one per line.
