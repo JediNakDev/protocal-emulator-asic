@@ -2,7 +2,8 @@
 
 Each criterion has an ID that the test suite (`make model`) reports as PASS or FAIL.
 The suite fails if any criterion fails or is never exercised.
-Every check observes the `uio` pins through an independent peer model, or the host bus, never engine internals.
+Protocol checks observe the `uio` pins through an independent peer model, or the host bus, never engine internals.
+Assembler checks validate program size and label capacity before loading.
 Timing limits are in nanoseconds or bit times and are converted to cycles of the 40 MHz clock.
 
 ## General
@@ -10,9 +11,9 @@ Timing limits are in nanoseconds or bit times and are converted to cycles of the
 | ID | Requirement |
 | --- | --- |
 | G1 | After reset, and after an engine restart, every `uio` pad is an input (`oe = 0`). |
-| G2 | No test produces a pin double-write, an engine-engine conflict, bus contention with a peer, or a protocol violation reported by a peer. Two engines driving one pad is detected. |
+| G2 | No test produces a pin double-write, an engine-engine conflict, bus contention with a peer, or a protocol violation reported by a peer; two engines driving one pad is detected when injected. |
 | G3 | Every protocol is selected only by the program and configuration loaded through the host bus; the RTL model is identical for all tests. |
-| G4 | Every program fits in 32 instruction words. |
+| G4 | Every program fits in 32 instruction words; the assembler accepts up to 64 labels and rejects excess labels with an error. |
 | G5 | Four engines run UART TX, UART RX, SPI and I2C at the same time with correct results. |
 | G6 | The CRC and line-coding helpers shared by the host and peer models match published check values and a hand-encoded USB packet. |
 
@@ -55,8 +56,8 @@ Timing limits are in nanoseconds or bit times and are converted to cycles of the
 | K1 | Host bit rate within 1.5 Mb/s ± 1.5%. |
 | K2 | Every host packet decodes at the independent device: SYNC, NRZI, bit stuffing, PID check, CRC5 / CRC16. |
 | K3 | Host EOP: SE0 for 1.25–1.50 µs, then J. |
-| K4 | Control transfers: GET_DESCRIPTOR (SETUP, DATA0, ACK; IN data stages with toggling DATA1/DATA0 and valid CRC16; status stage) returns the 18-byte device descriptor. SET_ADDRESS takes effect, and the device then answers at the new address only. |
-| K5 | Interrupt IN on EP1: NAK when no key is pressed; 8-byte HID reports with alternating DATA0/DATA1 when keys are pressed; every report is ACKed. |
+| K4 | Control transfers return the 18-byte device descriptor with valid CRC16 and DATA1/DATA0 toggling, apply SET_ADDRESS so only the new address answers, and complete SET_CONFIGURATION; unsupported configurations stall. |
+| K5 | EP1 is disabled until SET_CONFIGURATION(1) completes and after SET_CONFIGURATION(0); when configured, interrupt IN returns NAK when no key is pressed or 8-byte HID reports with alternating DATA0/DATA1 that are ACKed; reconfiguration resets the toggle to DATA0. |
 | K6 | The host receives correctly from a device whose clock is off by −1.5% and +1.5%. |
 | K7 | The host's handshake starts 2–7.5 bit times after the device's EOP (USB 2.0 §7.1.18). |
 | K8 | A packet with a bad CRC gets no device reply. The host times out, restarts the engine and continues. |

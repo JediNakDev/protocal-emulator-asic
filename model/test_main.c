@@ -115,6 +115,21 @@ static void test_reset(void) {
   no_errors(&b);
 }
 
+static void test_assembler_labels(void) {
+  printf("assembler: label capacity is independent of instruction count\n");
+  char src[1024], err[256];
+  pe_prog p;
+  int used = 0;
+  for (int i = 0; i < 64; i++)
+    used += snprintf(src + used, sizeof src - (size_t)used, "label%d:\n", i);
+  snprintf(src + used, sizeof src - (size_t)used, "nop\n");
+  CRIT("G4", pe_assemble(src, &p, err, sizeof err) == 0 && p.len == 1,
+       "64 labels on a one-word program rejected");
+  snprintf(src + used, sizeof src - (size_t)used, "label64:\nnop\n");
+  CRIT("G4", pe_assemble(src, &p, err, sizeof err) != 0 && strstr(err, "too many labels"),
+       "65 labels must produce a capacity error");
+}
+
 /* ======================================================================== */
 /* UART                                                                      */
 
@@ -487,6 +502,14 @@ static int usb_in(host *h, int eng, int addr, int ep, int *pid, uint8_t *data) {
   return n - 4;
 }
 
+static int usb_set_configuration(host *h, int eng, int addr, int config) {
+  const uint8_t req[8] = {0x00, 0x09, (uint8_t)config, 0x00, 0x00, 0x00, 0x00, 0x00};
+  uint8_t data[8];
+  int pid = 0;
+  return usb_setup(h, eng, addr, req) &&
+         usb_in(h, eng, addr, 0, &pid, data) == 0 && pid == PID_DATA1;
+}
+
 static void test_usb(double clock_err) {
   printf("usb: low-speed host, keyboard clock %+.1f%%\n", clock_err * 100);
   board b;
@@ -527,22 +550,47 @@ static void test_usb(double clock_err) {
   n = usb_in(&h, 0, 0, 1, &pid, d);
   CRIT(kk, n == -1, "old address still answers");
 
-  /* interrupt IN on EP1 */
+  /* Nonzero endpoints must stay disabled until configuration completes. */
   const char *kr = clock_err != 0 ? "K6" : "K5";
-  n = usb_in(&h, 0, 5, 1, &pid, d);
-  CRIT(kr, n == -2, "no key: expected NAK, got %d", n);
   static const uint8_t key_a[8] = {0, 0, 0x04, 0, 0, 0, 0, 0}, key_b[8] = {0x02, 0, 0x05, 0, 0, 0, 0, 0};
   usb_kbd_press(&k, key_a);
   n = usb_in(&h, 0, 5, 1, &pid, d);
+  CRIT(kr, n == -1, "unconfigured EP1 returned %d bytes", n);
+  static const uint8_t set_config[8] = {0x00, 0x09, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00};
+  CRIT(kk, usb_setup(&h, 0, 5, set_config), "SET_CONFIGURATION setup not ACKed");
+  n = usb_in(&h, 0, 5, 1, &pid, d);
+  CRIT(kr, n == -1, "EP1 enabled before the configuration status stage: %d", n);
+  CRIT(kk, usb_set_configuration(&h, 0, 5, 1), "SET_CONFIGURATION status stage failed");
+  n = usb_in(&h, 0, 5, 1, &pid, d);
   CRIT(kr, n == 8 && pid == PID_DATA0 && !memcmp(d, key_a, 8), "first report: n=%d pid=%x", n, pid);
+  n = usb_in(&h, 0, 5, 1, &pid, d);
+  CRIT(kr, n == -2, "no key: expected NAK, got %d", n);
   usb_kbd_press(&k, key_b);
   n = usb_in(&h, 0, 5, 1, &pid, d);
   CRIT(kr, n == 8 && pid == PID_DATA1 && !memcmp(d, key_b, 8), "second report: n=%d pid=%x", n, pid);
   host_wait(&h, 200);
   CRIT(kr, k.reports == 2 && k.ack_timeouts == 0, "reports ACKed %d, ACK timeouts %d", k.reports, k.ack_timeouts);
 
-  /* corrupted data packet: no reply, host recovers */
   if (clock_err == 0) {
+    /* Disable EP1, then configure again and verify its data toggle resets. */
+    CRIT("K4", usb_set_configuration(&h, 0, 5, 0), "deconfiguration failed");
+    usb_kbd_press(&k, key_a);
+    n = usb_in(&h, 0, 5, 1, &pid, d);
+    CRIT("K5", n == -1, "deconfigured EP1 returned %d bytes", n);
+    CRIT("K4", usb_set_configuration(&h, 0, 5, 1), "reconfiguration failed");
+    n = usb_in(&h, 0, 5, 1, &pid, d);
+    CRIT("K5", n == 8 && pid == PID_DATA0 && !memcmp(d, key_a, 8),
+         "reconfigured endpoint did not restart at DATA0: n=%d pid=%x", n, pid);
+
+    /* An unsupported configuration must stall without disabling EP1. */
+    static const uint8_t bad_config[8] = {0x00, 0x09, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00};
+    CRIT("K4", usb_setup(&h, 0, 5, bad_config), "bad configuration setup not ACKed");
+    n = usb_xfer(&h, 0, pk, usb_token(pk, PID_IN, 5, 0), 1, r);
+    CRIT("K4", n == 2 && r[1] == USB_PID(PID_STALL), "invalid configuration status did not stall");
+    n = usb_in(&h, 0, 5, 1, &pid, d);
+    CRIT("K5", n == -2, "invalid configuration disabled the configured endpoint");
+
+    /* Corrupted data packet: no reply, host recovers. */
     static const uint8_t zero[8] = {0};
     usb_xfer(&h, 0, pk, usb_token(pk, PID_OUT, 5, 0), 0, NULL);
     int len = usb_packet(pk, PID_DATA0, zero, 8);
@@ -685,6 +733,30 @@ static void test_reprogram_remap(void) {
   free(f.mem);
 }
 
+static void test_reload_pin_swap(void) {
+  printf("reload: swap SPI SCK and CS while another engine transmits UART\n");
+  board b;
+  host h;
+  uart_peer u;
+  setup(&b, &h);
+  b.quiet = true;
+  uart_peer_init(&u, 4, -1, PE_CLK_HZ / 115200, 0);
+  board_add_peer(&b, &u.base);
+  host_load(&h, 1, &P_UTX, MAP_UTX, UART_T0, 0);
+  host_put(&h, 1, 0x42);
+  host_put(&h, 1, 0xA5);
+  host_load(&h, 0, &P_SPI, MAP_SPI, 0, 0);
+  host_wait(&h, 20);
+  const int swapped[4] = {0, 1, 2, 3};
+  host_load(&h, 0, &P_SPI, swapped, 0, 0);
+  host_wait(&h, 24 * UART_T0);
+  CRIT("G3", b.chip.uio_oe == 0x1B && (b.chip.uio_out & 0x0B) == 0x08,
+       "SPI pins did not move to the swapped mapping");
+  CRIT("G5", u.nrx == 2 && u.rx[0] == 0x42 && u.rx[1] == 0xA5 && !u.ferr,
+       "reload interrupted the other engine: %d UART bytes", u.nrx);
+  no_errors(&b);
+}
+
 static void test_conflict_detected(void) {
   printf("checker sanity: two engines driving one pad is reported\n");
   board b;
@@ -727,6 +799,7 @@ int main(int argc, char **argv) {
 
   test_selfcheck();
   test_reset();
+  test_assembler_labels();
   test_uart_tx();
   test_uart_rx(0.0);
   test_uart_rx(-0.03);
@@ -743,6 +816,7 @@ int main(int argc, char **argv) {
   test_eth();
   test_four_engines();
   test_reprogram_remap();
+  test_reload_pin_swap();
   test_conflict_detected();
 
   int bad = 0;

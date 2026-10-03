@@ -111,8 +111,8 @@ typedef struct {
   uint8_t raw[1024], tx[1024];
   int nraw, ntx;
   /* device state */
-  uint8_t addr, new_addr;
-  bool addr_pend, ep0_status, report_ready, expect_ack, want_ipd;
+  uint8_t addr, new_addr, config, new_config;
+  bool addr_pend, config_pend, ep0_status, ep0_stall, report_ready, expect_ack, want_ipd;
   int tok_pid, tok_ep, ep0_len, ep0_off, ep0_tog, ep1_tog, pend, pend_len;
   uint8_t ep0[64], report[8];
   /* checks */

@@ -59,7 +59,8 @@ void host_clear_flags(host *h, int mask) { nib(h, HC_CLRF, mask & 15); }
 
 void host_load(host *h, int eng, const pe_prog *p, const int phys[PE_LPINS], uint16_t t0,
                uint16_t t1) {
-  host_ctrl(h, (uint8_t)(h->run & ~(1 << eng)), 0);
+  /* Release the old outputs before remapping pins one config byte at a time. */
+  host_ctrl(h, (uint8_t)(h->run & ~(1 << eng)), (uint8_t)(1 << eng));
   nib(h, HC_SEL, SEL_IMEM | eng);
   for (int i = 0; i < PE_IMEM; i++) {
     uint16_t w = i < p->len ? p->code[i] : 0;

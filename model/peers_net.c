@@ -37,7 +37,10 @@ static void usb_send(usb_kbd *k, uint64_t c, int pid, const uint8_t *d, int n) {
 }
 
 static void usb_in(usb_kbd *k, uint64_t c) {
-  if (k->tok_ep == 0 && k->ep0_status) {
+  if (k->tok_ep == 0 && k->ep0_stall) {
+    usb_send(k, c, PID_STALL, NULL, 0);
+    return;
+  } else if (k->tok_ep == 0 && k->ep0_status) {
     usb_send(k, c, PID_DATA1, NULL, 0);
     k->pend = P_EP0_STATUS;
   } else if (k->tok_ep == 0 && k->ep0_off < k->ep0_len) {
@@ -60,6 +63,10 @@ static void usb_setup(usb_kbd *k, const uint8_t *p) {
   k->setups++;
   k->ep0_len = k->ep0_off = 0;
   k->ep0_status = false;
+  k->ep0_stall = false;
+  k->addr_pend = k->config_pend = false;
+  k->expect_ack = k->want_ipd = false;
+  k->pend = P_NONE;
   if (p[0] == 0x80 && p[1] == 0x06 && (wvalue >> 8) == 1) {
     k->ep0_len = wlength < 18 ? wlength : 18;
     memcpy(k->ep0, dev_desc, 18);
@@ -68,6 +75,15 @@ static void usb_setup(usb_kbd *k, const uint8_t *p) {
     k->new_addr = (uint8_t)(wvalue & 0x7f);
     k->addr_pend = true;
     k->ep0_status = true;
+  } else if (p[0] == 0x00 && p[1] == 0x09) {
+    /* One modeled configuration, with EP1; zero disables its endpoints. */
+    if (!k->addr || wvalue > 1 || p[4] || p[5] || wlength) {
+      k->ep0_stall = true;
+    } else {
+      k->new_config = (uint8_t)wvalue;
+      k->config_pend = true;
+      k->ep0_status = true;
+    }
   } else {
     k->ep0_status = true;
   }
@@ -93,7 +109,7 @@ static void usb_packet_in(usb_kbd *k, board *b, uint64_t c) {
       return;
     }
     int addr = by[2] & 0x7f, ep = (by[2] >> 7) | (by[3] & 7) << 1;
-    if (addr != k->addr) {
+    if (addr != k->addr || (ep != 0 && !k->config)) {
       k->ignored++;
       k->tok_pid = 0;
       return;
@@ -125,6 +141,11 @@ static void usb_packet_in(usb_kbd *k, board *b, uint64_t c) {
       k->ep0_status = false;
       if (k->addr_pend) k->addr = k->new_addr;
       k->addr_pend = false;
+      if (k->config_pend) {
+        k->config = k->new_config;
+        k->ep1_tog = 0;
+      }
+      k->config_pend = false;
     } else if (k->pend == P_EP1) {
       k->report_ready = false;
       k->ep1_tog ^= 1;

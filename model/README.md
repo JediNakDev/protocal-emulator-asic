@@ -116,6 +116,7 @@ With `.out pin diff`, OUT and MOV to the out pin drive the inverse on the next l
 
 The assembler produces everything except the pad numbers and T0/T1, which the host chooses.
 The same program therefore runs on any pins at any rate.
+It accepts up to 64 labels and rejects excess labels before writing its label tables.
 
 ## Host bus
 
@@ -134,6 +135,8 @@ The host sets the command and nibble, then toggles the strobe in a later cycle.
 | 6 | CLRF | engine mask | Clear sticky flags |
 
 With the RP2040 changing a pin every two chip cycles, a byte write takes 8 cycles and a status read or pop takes 7.
+The loader restarts and stops the selected engine before writing program or configuration bytes, releasing its old outputs before pin remapping.
+Other engines keep running during the load.
 
 ## Protocols at 40 MHz
 
@@ -143,7 +146,7 @@ With the RP2040 changing a pin every two chip cycles, a byte write takes 8 cycle
 | `uart_rx` | 11 | Same; tested with a sender at ±3% | One byte per frame; a framing error sets the flag and drops the byte |
 | `spi_master` | 14 | SCK 10 MHz (clk/4), mode 0, no inter-byte gap | `n-1` as two bytes, then `n` bytes; `n` bytes come back; CS spans the frame |
 | `spi_div6` | 14 | SCK 6.67 MHz (clk/6); tolerates slower targets | Same |
-| `i2c_master` | 27 | SCL 400 kHz (T0 = 60, T1 = 36), clock stretching | Command byte `[7]` ACK out, `[6:5]` op (0 START, 1 STOP, 2 XFER). XFER takes a data byte (0xFF to read) and returns the data and ACK bytes. |
+| `i2c_master` | 27 | SCL 400 kHz (T0 = 60, T1 = 36), clock stretching | Command byte `[7]` ACK out, `[6:5]` op (0 START, 1 STOP, 2 XFER); XFER takes a data byte (0xFF to read) and returns the data and ACK bytes |
 | `usb_ls_host` | 26 | 1.481 Mb/s (T0 = 27, −1.2%); EOP, turnaround, edge-tracking receive | Line states after NRZI and stuffing, with a 15-bit count and a "listen" bit; the reply comes back as D+ samples with an end marker |
 | `eth10_tx` | 23 | 10 Mb/s Manchester, link pulses, TP_IDL, interframe gap | Bit count, then the frame bytes (preamble to FCS) |
 
@@ -160,10 +163,17 @@ Every program runs on any pad; the remap test proves it.
 Peers, chosen from parts that can be plugged in after fabrication:
 
 - **USB-UART bridge** (e.g. Pmod USBUART): checks every edge against the bit grid, can transmit off-rate, can send a bad stop bit, and can echo.
-- **W25Q128JV**: JEDEC ID, read, fast read, WREN/WRDI, status, page program and erase with busy times. It checks the mode, the SCK timing and MOSI setup, and can delay MISO.
-- **ADT7420** (Pmod TMP2): register pointer, ID 0xCB, clock stretching. It checks every UM10204 Fast-mode limit.
-- **USB low-speed keyboard**: decodes NRZI, bit stuffing, PIDs, CRC5 and CRC16, and recovers its clock on edges. It answers GET_DESCRIPTOR and SET_ADDRESS, gives HID reports with data toggles, and NAKs when idle. It runs with ±1.5% clock error, ignores bad CRCs, and checks EOP width, bit rate and handshake timing.
-- **10BASE-T receiver**: requires exact 50 ns half-bits and a mid-bit transition in every bit. It checks preamble, SFD, FCS, TP_IDL, interframe gap, and link pulse width and spacing.
+- **W25Q128JV**: JEDEC ID, read, fast read, WREN/WRDI, status, page program and erase with busy times.
+  It checks the mode, the SCK timing and MOSI setup, and can delay MISO.
+- **ADT7420** (Pmod TMP2): register pointer, ID 0xCB, clock stretching.
+  It checks every UM10204 Fast-mode limit.
+- **USB low-speed keyboard**: decodes NRZI, bit stuffing, PIDs, CRC5 and CRC16, and recovers its clock on edges.
+  It answers GET_DESCRIPTOR, SET_ADDRESS and SET_CONFIGURATION, gives HID reports with data toggles, and NAKs when configured but idle.
+  Configuration 1 enables EP1 after the status handshake; configuration 0 disables it, and unsupported configuration values stall.
+  Reconfiguration resets EP1's data toggle to DATA0.
+  It runs with ±1.5% clock error, ignores bad CRCs, and checks EOP width, bit rate and handshake timing.
+- **10BASE-T receiver**: requires exact 50 ns half-bits and a mid-bit transition in every bit.
+  It checks preamble, SFD, FCS, TP_IDL, interframe gap, and link pulse width and spacing.
 
 ## Results (all 37 criteria pass)
 
@@ -171,12 +181,12 @@ Peers, chosen from parts that can be plugged in after fabrication:
 | --- | --- |
 | UART | 48 bytes, edges exactly on the 347-cycle grid, 3470 cycles per back-to-back frame; RX at ±3%; framing error flagged; 64-byte full-duplex echo |
 | SPI | JEDEC `EF 40 18`, 252-byte read, fast read, page program + polling + read-back; SCK 10 MHz with no gaps across a 256-byte frame (1.24 MB/s including host traffic) |
-| SPI margin | `spi_master` needs MISO within one clock of the SCK edge reaching the pin. `spi_div6` tolerates two more clocks. |
-| I2C | 400.0 kHz. tLOW 1.50 µs, tHIGH 1.00 µs, tSU;DAT 1.2 µs, tHD;STA 1.50 µs, tSU;STA 1.00 µs, tSU;STO 1.00 µs, tBUF 4.50 µs; the same with a target stretching 10 µs per ACK. |
-| USB | Device descriptor, SET_ADDRESS, NAK, two HID reports with DATA0/DATA1. Host at −1.23% (limit ±1.5%), EOP 1.35 µs (limit 1.25–1.50 µs), handshake 3.7–3.9 bit times after the device EOP (limit 2–7.5). Keyboard clock at ±1.5%; recovery from a bad-CRC packet. |
-| Ethernet | 4 UDP frames with valid FCS and IP checksums, including a 1518-byte frame streamed from the host. Half-bits exactly 50 ns, TP_IDL 300 ns, interframe gap ≥ 12.1 µs, link pulses 100 ns every 14.7 ms. |
+| SPI margin | `spi_master` needs MISO within one clock of the SCK edge reaching the pin; `spi_div6` tolerates two more clocks |
+| I2C | 400.0 kHz; tLOW 1.50 µs, tHIGH 1.00 µs, tSU;DAT 1.2 µs, tHD;STA 1.50 µs, tSU;STA 1.00 µs, tSU;STO 1.00 µs, tBUF 4.50 µs; the same with a target stretching 10 µs per ACK |
+| USB | Device descriptor, SET_ADDRESS, SET_CONFIGURATION, disabled endpoints before configuration and after deconfiguration, NAK, HID reports with DATA0/DATA1 and toggle reset on reconfiguration; host at −1.23% (limit ±1.5%), EOP 1.35 µs (limit 1.25–1.50 µs), handshake 3.7–3.9 bit times after the device EOP (limit 2–7.5); keyboard clock at ±1.5% and recovery from a bad-CRC packet |
+| Ethernet | 4 UDP frames with valid FCS and IP checksums, including a 1518-byte frame streamed from the host; half-bits exactly 50 ns, TP_IDL 300 ns, interframe gap ≥ 12.1 µs, link pulses 100 ns every 14.7 ms |
 | Concurrency | UART TX, UART RX, SPI and I2C correct on four engines at once |
-| Checker sanity | Removing edge re-phasing from UART RX, I2C or USB fails U4, I4 or K4–K8. A 3-cycle Ethernet half-bit fails E1/E2, a short EOP fails K3, a short interframe gap fails E4, a short TP_IDL fails E3, two stop bits fail U3. |
+| Checker sanity | Removing edge re-phasing from UART RX, I2C or USB fails U4, I4 or K4–K8; a 3-cycle Ethernet half-bit fails E1/E2, a short EOP fails K3, a short interframe gap fails E4, a short TP_IDL fails E3, two stop bits fail U3 |
 
 ## State budget
 
@@ -194,6 +204,8 @@ The GDS flow has to confirm this.
 ## Limitations
 
 - Ethernet is transmit-only: receiving needs an analog front end and more oversampling than a 40 MHz single-edge clock gives.
-- USB is the host role at low speed. The RP2040 does NRZI, stuffing and CRC, and its response time is part of the measured handshake timing.
-- Pad speeds and voltages need confirming for IHP CMOS5L. SPI at clk/4 needs MISO within 50 ns of SCK leaving the chip; use `spi_div6` otherwise.
+- USB is the host role at low speed.
+  The RP2040 does NRZI, stuffing and CRC, and its response time is part of the measured handshake timing.
+- Pad speeds and voltages need confirming for IHP CMOS5L.
+  SPI at clk/4 needs MISO within 50 ns of SCK leaving the chip; use `spi_div6` otherwise.
 - No metastability or analog edge-rate modelling; I2C is single-master; write the instruction memory only while an engine is stopped.

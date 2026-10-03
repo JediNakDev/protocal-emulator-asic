@@ -271,11 +271,16 @@ int pe_assemble(const char *src, pe_prog *p, char *err, int errlen) {
     int first = 0;
     /* labels */
     while (first < l.n && l.tok[first][strlen(l.tok[first]) - 1] == ':') {
+      if (a->nlab >= (int)(sizeof a->lab / sizeof a->lab[0])) {
+        rc = fail(a, lineno, "too many labels", NULL);
+        break;
+      }
       l.tok[first][strlen(l.tok[first]) - 1] = 0;
       snprintf(a->lab[a->nlab], 32, "%s", l.tok[first]);
       a->labaddr[a->nlab++] = a->nins;
       first++;
     }
+    if (rc) break;
     if (first == l.n) continue;
     if (first) {
       for (int i = first; i < l.n; i++) memcpy(l.tok[i - first], l.tok[i], 32);
