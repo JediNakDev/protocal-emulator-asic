@@ -19,6 +19,11 @@ enum { LN_SE0 = 0, LN_K = 1, LN_J = 2 };
 enum { U_IDLE, U_RX, U_WAIT, U_TX };
 enum { P_NONE, P_EP0_DATA, P_EP0_STATUS, P_EP1 };
 
+/* line state: D+ in bit 0, D- in bit 1 (LN_*, or 3 for SE1) */
+static int line_state(uint8_t wire, int dp, int dm) {
+  return ((wire >> dp) & 1) | ((wire >> dm) & 1) << 1;
+}
+
 static const uint8_t dev_desc[18] = {0x12, 0x01, 0x10, 0x01, 0x00, 0x00, 0x00, 0x08, 0x6d,
                                      0x04, 0x1c, 0xc3, 0x00, 0x01, 0x01, 0x02, 0x00, 0x01};
 
@@ -132,34 +137,33 @@ static void usb_packet_in(usb_kbd *k, board *b, uint64_t c) {
   }
 }
 
-static void usb_step(peer *pp, board *b, uint8_t wire) {
+static void usb_step(peer *pp, board *b, const wire_view *w) {
   usb_kbd *k = (usb_kbd *)pp;
   uint64_t c = b->cycle;
-  int ln = ((wire >> k->dp) & 1) | ((wire >> k->dm) & 1) << 1;
+  int ln = line_state(w->now, k->dp, k->dm), pline = line_state(w->prev, k->dp, k->dm);
 
   if (k->st == U_WAIT && c >= k->tx_at) {
     k->st = U_TX;
     k->tx_t0 = (double)c + 1;
   }
   if (k->st == U_TX) { /* drive the line for the next cycle */
-    int i = (int)floor(((double)c + 1 - k->tx_t0) / k->tbit), code;
+    bitgrid g = {k->tx_t0, k->tbit};
+    int i = bg_bit(&g, c + 1), code;
     if (i < k->ntx) code = k->tx[i] ? LN_K : LN_J;
     else if (i < k->ntx + 2) code = LN_SE0;
     else if (i < k->ntx + 3) code = LN_J;
     else code = -1;
-    if (code < 0) {
+    bool drive = code >= 0;
+    peer_drive(&k->base, k->dp, drive, drive && (code & 1));
+    peer_drive(&k->base, k->dm, drive, drive && (code & 2));
+    if (!drive) {
       k->st = U_IDLE;
-      k->base.oe = 0;
-      k->eop_end = (uint64_t)(k->tx_t0 + (k->ntx + 2) * k->tbit);
+      k->eop_end = (uint64_t)bg_start(&g, k->ntx + 2);
       if (k->expect_ack) {
         k->want_ipd = true;
         k->ack_deadline = c + (uint64_t)(16 * USB_NOM);
       }
-    } else {
-      k->base.oe = (uint8_t)(1 << k->dp | 1 << k->dm);
-      k->base.out = (uint8_t)((code & 1) << k->dp | (code >> 1) << k->dm);
     }
-    k->pline = ln;
     return;
   }
 
@@ -169,31 +173,26 @@ static void usb_step(peer *pp, board *b, uint8_t wire) {
       k->expect_ack = false;
       k->pend = P_NONE;
     }
-    if (k->pline == LN_J && ln == LN_K) {
+    if (pline == LN_J && ln == LN_K) {
       k->st = U_RX;
       k->first_edge = c;
       k->next_s = (double)c + USB_NOM / 2;
       k->nraw = 0;
       k->se0_t = 0;
       if (k->want_ipd) {
-        double d = (double)(c - k->eop_end) / USB_NOM;
-        if (d < k->min_ipd) k->min_ipd = d;
-        if (d > k->max_ipd) k->max_ipd = d;
+        span_add(&k->ipd, (double)(c - k->eop_end) / USB_NOM);
         k->want_ipd = false;
       }
     }
   } else if (k->st == U_RX) {
     if (ln == 3) board_error(b, "usb device: SE1 on the bus");
-    if (ln != k->pline) {
+    if (ln != pline) {
       k->next_s = (double)c + USB_NOM / 2; /* re-centre on every edge */
       if (ln == LN_SE0 && !k->se0_t) k->se0_t = c;
     }
-    if (k->pline == LN_SE0 && ln == LN_J) { /* end of packet */
-      int w = (int)(c - k->se0_t);
-      if (w < k->min_eop) k->min_eop = w;
-      if (w > k->max_eop) k->max_eop = w;
-      double err = fabs((double)(k->se0_t - k->first_edge) / k->nraw / USB_NOM - 1);
-      if (err > k->max_rate_err) k->max_rate_err = err;
+    if (pline == LN_SE0 && ln == LN_J) { /* end of packet */
+      span_add(&k->eop, (double)(c - k->se0_t));
+      span_add(&k->rate_err, fabs((double)(k->se0_t - k->first_edge) / k->nraw / USB_NOM - 1));
       k->st = U_IDLE;
       usb_packet_in(k, b, c);
     } else if (ln != LN_SE0 && !k->se0_t && (double)c >= k->next_s) {
@@ -201,7 +200,6 @@ static void usb_step(peer *pp, board *b, uint8_t wire) {
       k->next_s += USB_NOM;
     }
   }
-  k->pline = ln;
 }
 
 void usb_kbd_init(usb_kbd *k, int dp, int dm, double clock_err) {
@@ -212,9 +210,6 @@ void usb_kbd_init(usb_kbd *k, int dp, int dm, double clock_err) {
   k->dm = dm;
   k->tbit = USB_NOM * (1 - clock_err); /* faster clock = shorter bits */
   k->resp_bits = 3;
-  k->pline = LN_J;
-  k->min_ipd = 1e9;
-  k->min_eop = 1 << 30;
 }
 
 void usb_kbd_press(usb_kbd *k, const uint8_t report[8]) {
@@ -244,8 +239,7 @@ static void eth_decode(eth_rx *e, board *b) {
     }
     tp++;
   }
-  if (tp < e->tpidl_min) e->tpidl_min = tp;
-  if (tp > e->tpidl_max) e->tpidl_max = tp;
+  span_add(&e->tpidl, tp);
   if (nb % 8) {
     e->odd_bits++;
     board_error(b, "eth: %d bits is not whole bytes", nb);
@@ -280,11 +274,16 @@ static void eth_decode(eth_rx *e, board *b) {
   e->nframes++;
 }
 
-static void eth_step(peer *pp, board *b, uint8_t wire) {
+/* differential level: +1, -1, or 0 when both wires are equal (idle) */
+static int eth_level(uint8_t wire, int tdp, int tdm) {
+  int p = (wire >> tdp) & 1, m = (wire >> tdm) & 1;
+  return p == m ? 0 : p ? 1 : -1;
+}
+
+static void eth_step(peer *pp, board *b, const wire_view *w) {
   eth_rx *e = (eth_rx *)pp;
   uint64_t c = b->cycle;
-  int p = (wire >> e->tdp) & 1, m = (wire >> e->tdm) & 1;
-  int lv = p == m ? 0 : p ? 1 : -1;
+  int lv = eth_level(w->now, e->tdp, e->tdm), prev = eth_level(w->prev, e->tdp, e->tdm);
   if (e->in_frame) {
     if (e->nlev < ETH_LEVBUF) e->lev[e->nlev++] = (int8_t)lv;
     if (lv == 0) {
@@ -294,29 +293,22 @@ static void eth_step(peer *pp, board *b, uint8_t wire) {
     }
   } else if (e->in_pulse) {
     if (lv != 1) {
-      int w = (int)(c - e->pstart);
-      if (w < e->nlp_wmin) e->nlp_wmin = w;
-      if (w > e->nlp_wmax) e->nlp_wmax = w;
-      if (e->last_nlp) {
-        uint64_t g = e->pstart - e->last_nlp;
-        if (g < e->nlp_gmin) e->nlp_gmin = g;
-        if (g > e->nlp_gmax) e->nlp_gmax = g;
-      }
+      span_add(&e->nlp_width, (double)(c - e->pstart));
+      span_since(&e->nlp_gap, e->pstart, e->last_nlp);
       e->last_nlp = e->pstart;
       e->nlps++;
       e->in_pulse = false;
     }
-  } else if (e->prev == 0 && lv == 1) {
+  } else if (prev == 0 && lv == 1) {
     e->in_pulse = true;
     e->pstart = c;
-  } else if (e->prev == 0 && lv == -1) {
+  } else if (prev == 0 && lv == -1) {
     e->in_frame = true;
     e->nlev = 0;
     e->lev[e->nlev++] = -1;
-    if (e->last_end && (int)(c - e->last_end) < e->ifg_min) e->ifg_min = (int)(c - e->last_end);
+    span_since(&e->ifg, c, e->last_end);
     e->last_nlp = 0; /* link pulses restart after traffic */
   }
-  e->prev = lv;
 }
 
 void eth_rx_init(eth_rx *e, int tdp, int tdm) {
@@ -326,8 +318,6 @@ void eth_rx_init(eth_rx *e, int tdp, int tdm) {
   e->tdp = tdp;
   e->tdm = tdm;
   e->lev = malloc(ETH_LEVBUF);
-  e->nlp_wmin = e->ifg_min = e->tpidl_min = 1 << 30;
-  e->nlp_gmin = UINT64_MAX;
 }
 
 void eth_rx_free(eth_rx *e) { free(e->lev); }

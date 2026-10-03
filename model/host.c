@@ -108,18 +108,33 @@ int host_get(host *h, int eng, uint8_t *v, uint64_t timeout) {
   return 0;
 }
 
-int host_stream(host *h, int eng, const uint8_t *tx, int ntx, uint8_t *rx, int nrx,
-                uint64_t timeout) {
-  int sent = 0, got = 0;
+/* send hdr[] then tx[] */
+static int stream(host *h, int eng, const uint8_t *hdr, int nh, const uint8_t *tx, int ntx,
+                  uint8_t *rx, int nrx, uint64_t timeout) {
+  int sent = 0, got = 0, total = nh + ntx;
   uint64_t end = h->b->cycle + timeout;
-  while ((sent < ntx || got < nrx) && h->b->cycle < end) {
+  while ((sent < total || got < nrx) && h->b->cycle < end) {
     uint8_t s = host_est(h, eng);
     if (got < nrx && (s & ST_RXNE)) {
       uint8_t v = host_pop(h, eng);
       if (rx) rx[got] = v;
       got++;
     }
-    if (sent < ntx && !(s & ST_TXFULL)) host_write_tx(h, eng, tx[sent++]);
+    if (sent < total && !(s & ST_TXFULL)) {
+      host_write_tx(h, eng, sent < nh ? hdr[sent] : tx[sent - nh]);
+      sent++;
+    }
   }
-  return got == nrx && sent == ntx;
+  return got == nrx && sent == total;
+}
+
+int host_stream(host *h, int eng, const uint8_t *tx, int ntx, uint8_t *rx, int nrx,
+                uint64_t timeout) {
+  return stream(h, eng, NULL, 0, tx, ntx, rx, nrx, timeout);
+}
+
+int host_frame(host *h, int eng, uint16_t hdr, const uint8_t *tx, int ntx, uint8_t *rx, int nrx,
+               uint64_t timeout) {
+  const uint8_t hb[2] = {(uint8_t)(hdr >> 8), (uint8_t)hdr};
+  return stream(h, eng, hb, 2, tx, ntx, rx, nrx, timeout);
 }

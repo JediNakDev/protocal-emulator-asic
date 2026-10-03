@@ -3,7 +3,7 @@
  * and the RP2040-side synchroniser on uo_out.
  *
  * Cycle t:  wire(t) = resolve(chip pads registered at t-1, peer drives from t-1)
- *           peers observe wire(t) and set their drive for t+1
+ *           peers observe wire(t) and wire(t-1) and set their drive for t+1
  *           chip executes, reading uio as wire(t-2) through its synchroniser
  *
  * SPDX-License-Identifier: Apache-2.0
@@ -47,9 +47,10 @@ void board_step(board *b) {
   }
   /* driven pads take the driven level; undriven pads follow their pull */
   uint8_t undriven = (uint8_t)~(low | high);
-  b->wire = (uint8_t)(high | (undriven & ~b->pulldown));
+  wire_view w = {.now = (uint8_t)(high | (undriven & ~b->pulldown)), .prev = b->wire};
+  b->wire = w.now;
 
-  for (int i = 0; i < b->npeers; i++) b->peers[i]->step(b->peers[i], b, b->wire);
+  for (int i = 0; i < b->npeers; i++) b->peers[i]->step(b->peers[i], b, &w);
 
   b->host_q2 = b->host_q1;
   b->host_q1 = b->chip.uo;

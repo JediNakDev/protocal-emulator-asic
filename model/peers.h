@@ -17,6 +17,14 @@
 
 #include "pe.h"
 
+/* Drive one pin from the next cycle on (oe = 1), or release it (oe = 0).
+ * An open-drain output drives 0 or releases. */
+static inline void peer_drive(peer *p, int pin, bool oe, int v) {
+  uint8_t m = (uint8_t)(1 << pin);
+  p->oe = (uint8_t)(oe ? p->oe | m : p->oe & ~m);
+  p->out = (uint8_t)((v & 1) ? p->out | m : p->out & ~m);
+}
+
 typedef struct {
   peer base;
   int rx_pin, tx_pin;   /* uio pins: peer listens on rx_pin, drives tx_pin */
@@ -27,11 +35,11 @@ typedef struct {
   /* receiver */
   int rst, rbit;
   uint64_t rstart;
-  uint8_t rbyte, rprev;
+  uint8_t rbyte;
   uint8_t rx[1024];
   uint64_t starts[1024]; /* start-bit edge of each received frame */
   int nrx, ferr;
-  double max_dev;       /* worst edge deviation from the ideal bit grid    */
+  span edge_dev;        /* edge distance from the ideal bit grid (cycles)  */
   /* transmitter: bit 8 of a queue entry forces a bad stop bit */
   uint16_t txq[1024];
   int txh, txt;
@@ -47,7 +55,6 @@ typedef struct {
   peer base;
   int sck, mosi, miso, cs;
   uint8_t *mem;
-  uint8_t psck, pcs, pmosi;
   int bitc, nbyte;
   uint8_t sin, sout, cmd;
   bool outen;
@@ -59,7 +66,8 @@ typedef struct {
   uint32_t paddr;
   int mode;
   uint64_t last_rise, last_fall, cs_fall, cs_rise;
-  int min_period, max_period, min_high, min_low, min_cs_high, frames, rises;
+  span period, high, low, cs_high; /* SCK and CS timing (cycles)          */
+  int frames, rises;
   uint64_t bytes;
   int tpp, tse;  /* busy times in cycles */
   int extra_lat; /* extra MISO delay in cycles (0..7) */
@@ -79,13 +87,12 @@ typedef struct {
   uint8_t sh, tx;
   bool rw, rose, mack;
   bool sda_low, scl_low;
-  uint8_t pscl, psda;
   int stretch;
   uint64_t stretch_until;
   /* checker */
   uint64_t t_rise, t_fall, t_sda, t_start, t_stop;
   bool after_start, sda_moved, stretched;
-  int min_low, min_high, min_sudat, min_hdsta, min_susta, min_susto, min_buf, min_period;
+  span low, high, sudat, hdsta, susta, susto, buf, period; /* cycles      */
   uint64_t last_rise_p;
   int starts, stops, bytes, nstretch;
 } i2c_adt7420;
@@ -97,7 +104,7 @@ typedef struct {
   int dp, dm;
   double tbit;          /* device transmit bit period (cycles)             */
   int resp_bits;        /* bus turnaround before replying (bit times)      */
-  int st, pline;
+  int st;
   double next_s;
   uint64_t first_edge, se0_t, tx_at, eop_end, ack_deadline;
   double tx_t0;
@@ -109,8 +116,9 @@ typedef struct {
   int tok_pid, tok_ep, ep0_len, ep0_off, ep0_tog, ep1_tog, pend, pend_len;
   uint8_t ep0[64], report[8];
   /* checks */
-  double max_rate_err, min_ipd, max_ipd;
-  int min_eop, max_eop;
+  span rate_err;        /* |host bit rate / nominal - 1| per packet          */
+  span ipd;             /* host handshake after the device EOP (bit times) */
+  span eop;             /* host EOP SE0 width (cycles)                      */
   int pkts, bad_crc, bad_coding, ignored, acks, naks, ack_timeouts, setups, reports;
 } usb_kbd;
 
@@ -121,14 +129,12 @@ void usb_kbd_press(usb_kbd *k, const uint8_t report[8]);
 typedef struct {
   peer base;
   int tdp, tdm;
-  int prev;
   bool in_frame, in_pulse;
   int8_t *lev;
   int nlev;
   uint64_t pstart, last_nlp, last_end;
-  int nlps, nlp_wmin, nlp_wmax;
-  uint64_t nlp_gmin, nlp_gmax;
-  int ifg_min, tpidl_min, tpidl_max;
+  int nlps;
+  span nlp_width, nlp_gap, ifg, tpidl; /* cycles                           */
   uint8_t frame[ETH_MAXF][1600];
   int flen[ETH_MAXF], nframes;
   int bad_manch, bad_pre, bad_fcs, bad_len, odd_bits;

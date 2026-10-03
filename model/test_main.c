@@ -147,7 +147,7 @@ static void test_uart_tx(void) {
   CRIT("U1", u.nrx == n && !memcmp(u.rx, msg, (size_t)n) && u.ferr == 0, "received %d of %d", u.nrx, n);
   double baud_err = (double)UART_T0 / (PE_CLK_HZ / 115200) - 1;
   CRIT("U2", baud_err < 0.005 && baud_err > -0.005, "baud error %.3f%%", baud_err * 100);
-  CRIT("U2", g.max_dev <= 1.0, "edge deviation %.2f cycles", g.max_dev);
+  CRIT("U2", g.edge_dev.hi <= 1.0, "edge deviation %.2f cycles", g.edge_dev.hi);
   CRIT("U3", per_frame <= 10 * UART_T0 + 1 && per_frame >= 10 * UART_T0 - 1, "%.1f cycles per frame", per_frame);
   no_errors(&b);
   printf("  %d bytes, %.0f baud (%+.3f%%), %.1f cycles per back-to-back frame\n", u.nrx,
@@ -225,11 +225,7 @@ static void test_uart_echo(void) {
 /* SPI                                                                       */
 
 static int spi_xfer(host *h, int eng, const uint8_t *tx, uint8_t *rx, int n) {
-  uint8_t buf[260];
-  buf[0] = (uint8_t)((n - 1) >> 8);
-  buf[1] = (uint8_t)(n - 1);
-  memcpy(buf + 2, tx, (size_t)n);
-  return host_stream(h, eng, buf, n + 2, rx, n, 400000);
+  return host_frame(h, eng, (uint16_t)(n - 1), tx, n, rx, n, 400000);
 }
 
 static void test_spi(void) {
@@ -252,13 +248,13 @@ static void test_spi(void) {
   memset(tx, 0, sizeof tx);
   tx[0] = 0x03; tx[1] = 0x00; tx[2] = 0x10; tx[3] = 0x00;
   uint64_t c0 = b.cycle;
-  f.max_period = 0;
+  f.period.hi = 0; /* longest period from this frame on */
   ok = spi_xfer(&h, 0, tx, rx, 256);
   uint64_t el = b.cycle - c0;
   CRIT("S4", ok && !memcmp(rx + 4, f.mem + 0x1000, 252), "read data");
-  CRIT("S2", f.max_period == 4, "longest SCK period %d cycles in a 256-byte frame", f.max_period);
-  printf("  252-byte read: %.2f MB/s incl. host traffic, longest SCK period %d cycles\n",
-         256 / ((double)el / PE_CLK_HZ) / 1e6, f.max_period);
+  CRIT("S2", f.period.hi == 4, "longest SCK period %.0f cycles in a 256-byte frame", f.period.hi);
+  printf("  252-byte read: %.2f MB/s incl. host traffic, longest SCK period %.0f cycles\n",
+         256 / ((double)el / PE_CLK_HZ) / 1e6, f.period.hi);
 
   memset(tx, 0, sizeof tx);
   tx[0] = 0x0B; tx[1] = 0x00; tx[2] = 0x13; tx[3] = 0x21;
@@ -285,13 +281,13 @@ static void test_spi(void) {
   spi_xfer(&h, 0, tx, rx, 36);
   CRIT("S4", polls > 1 && !memcmp(rx + 4, data, 32), "page program read-back (%d polls)", polls);
 
-  CRIT("S1", f.min_period == 4 && f.min_high >= 2 && f.min_low >= 2 && f.mode == 0,
-       "period %d high %d low %d mode %d", f.min_period, f.min_high, f.min_low, f.mode);
+  CRIT("S1", f.period.lo == 4 && f.high.lo >= 2 && f.low.lo >= 2 && f.mode == 0,
+       "period %.0f high %.0f low %.0f mode %d", f.period.lo, f.high.lo, f.low.lo, f.mode);
   CRIT("S3", b.errors == 0, "MOSI changed on a rising edge");
-  CRIT("S5", f.min_cs_high >= PE_NS(50), "CS high %d cycles", f.min_cs_high);
+  CRIT("S5", f.cs_high.lo >= PE_NS(50), "CS high %.0f cycles", f.cs_high.lo);
   no_errors(&b);
   printf("  SCK %.1f MHz, CS high >= %d ns, %d status polls during page program\n",
-         PE_CLK_HZ / f.min_period / 1e6, (int)(f.min_cs_high * 1e9 / PE_CLK_HZ), polls);
+         PE_CLK_HZ / f.period.lo / 1e6, (int)(f.cs_high.lo * 1e9 / PE_CLK_HZ), polls);
   free(f.mem);
 }
 
@@ -307,7 +303,7 @@ static int spi_read_ok(const pe_prog *p, int extra_lat, int *period) {
   host_load(&h, 0, p, MAP_SPI, 0, 0);
   uint8_t tx[68] = {0x03, 0x00, 0x04, 0x00}, rx[68];
   int ok = spi_xfer(&h, 0, tx, rx, 68) && !memcmp(rx + 4, f.mem + 0x400, 64) && b.errors == 0;
-  *period = f.min_period;
+  *period = (int)f.period.lo;
   free(f.mem);
   return ok;
 }
@@ -400,21 +396,21 @@ static void test_i2c(int stretch) {
 
   host_wait(&h, 2000);
   CRIT("I5", b.wire == 0xff && b.chip.uio_oe == 0, "bus not released after STOP");
-  CRIT(t, d.min_period >= PE_NS(2500), "SCL period %d", d.min_period);
-  CRIT(t, d.min_low >= PE_NS(1300), "tLOW %d", d.min_low);
-  CRIT(t, d.min_high >= PE_NS(600), "tHIGH %d", d.min_high);
-  CRIT(t, d.min_sudat >= PE_NS(100), "tSU;DAT %d", d.min_sudat);
-  CRIT(t, d.min_hdsta >= PE_NS(600), "tHD;STA %d", d.min_hdsta);
-  CRIT(t, d.min_susta >= PE_NS(600), "tSU;STA %d", d.min_susta);
-  CRIT(t, d.min_susto >= PE_NS(600), "tSU;STO %d", d.min_susto);
-  CRIT(t, d.min_buf >= PE_NS(1300), "tBUF %d", d.min_buf);
+  CRIT(t, d.period.lo >= PE_NS(2500), "SCL period %.0f", d.period.lo);
+  CRIT(t, d.low.lo >= PE_NS(1300), "tLOW %.0f", d.low.lo);
+  CRIT(t, d.high.lo >= PE_NS(600), "tHIGH %.0f", d.high.lo);
+  CRIT(t, d.sudat.lo >= PE_NS(100), "tSU;DAT %.0f", d.sudat.lo);
+  CRIT(t, d.hdsta.lo >= PE_NS(600), "tHD;STA %.0f", d.hdsta.lo);
+  CRIT(t, d.susta.lo >= PE_NS(600), "tSU;STA %.0f", d.susta.lo);
+  CRIT(t, d.susto.lo >= PE_NS(600), "tSU;STO %.0f", d.susto.lo);
+  CRIT(t, d.buf.lo >= PE_NS(1300), "tBUF %.0f", d.buf.lo);
   if (stretch) CRIT("I4", d.nstretch > 0 && ok, "target never stretched");
   no_errors(&b);
   double us = 1e6 / PE_CLK_HZ;
   printf("  SCL %.1f kHz; tLOW %.2f us, tHIGH %.2f us, tSU;DAT %.0f ns, tHD;STA %.2f us, "
          "tSU;STA %.2f us, tSU;STO %.2f us, tBUF %.2f us\n",
-         PE_CLK_HZ / d.min_period / 1e3, d.min_low * us, d.min_high * us, d.min_sudat * us * 1e3,
-         d.min_hdsta * us, d.min_susta * us, d.min_susto * us, d.min_buf * us);
+         PE_CLK_HZ / d.period.lo / 1e3, d.low.lo * us, d.high.lo * us, d.sudat.lo * us * 1e3,
+         d.hdsta.lo * us, d.susta.lo * us, d.susto.lo * us, d.buf.lo * us);
 }
 
 /* ======================================================================== */
@@ -424,13 +420,13 @@ static void test_i2c(int stretch) {
  * Returns the reply length in bytes (SYNC, PID, ...), 0 when not listening,
  * -1 on timeout (engine restarted) or a reply that does not decode. */
 static int usb_xfer(host *h, int eng, const uint8_t *pk, int n, int listen, uint8_t *reply) {
-  uint8_t line[512], buf[80];
+  uint8_t line[512], bits[64];
   int nl = usb_encode(pk, n, line), pad = (8 - nl % 8) % 8, total = nl + pad;
-  buf[0] = (uint8_t)(((total - 1) >> 8) << 1 | listen);
-  buf[1] = (uint8_t)(total - 1);
-  memset(buf + 2, 0, (size_t)(total / 8));
-  for (int i = 0; i < nl; i++) buf[2 + (pad + i) / 8] |= (uint8_t)(line[i] << ((pad + i) % 8));
-  if (!host_stream(h, eng, buf, 2 + total / 8, NULL, 0, 100000)) return -1;
+  memset(bits, 0, (size_t)(total / 8));
+  for (int i = 0; i < nl; i++) bits[(pad + i) / 8] |= (uint8_t)(line[i] << ((pad + i) % 8));
+  /* header: [line bits-1, high 7 bits << 1 | listen] [low 8 bits] */
+  uint16_t hdr = (uint16_t)(((total - 1) >> 8 << 1 | listen) << 8 | ((total - 1) & 0xff));
+  if (!host_frame(h, eng, hdr, bits, total / 8, NULL, 0, 100000)) return -1;
   if (!listen) return 0;
 
   uint8_t rx[64];
@@ -558,31 +554,24 @@ static void test_usb(double clock_err) {
   }
 
   double rate = PE_CLK_HZ / USB_T0;
-  CRIT("K1", k.max_rate_err <= 0.015, "bit rate error %.2f%%", k.max_rate_err * 100);
+  CRIT("K1", k.rate_err.hi <= 0.015, "bit rate error %.2f%%", k.rate_err.hi * 100);
   CRIT("K2", k.bad_coding == 0 && k.bad_crc == (clock_err == 0 ? 1 : 0) && k.pkts >= 19,
        "%d packets, %d undecodable, %d bad CRC", k.pkts, k.bad_coding, k.bad_crc);
-  CRIT("K3", k.min_eop >= PE_NS(1250) - 1 && k.max_eop <= (int)(1.5e-6 * PE_CLK_HZ),
-       "EOP SE0 %d..%d cycles", k.min_eop, k.max_eop);
-  CRIT("K7", k.min_ipd >= 2 && k.max_ipd <= 7.5, "host handshake %.2f..%.2f bit times", k.min_ipd, k.max_ipd);
+  CRIT("K3", k.eop.lo >= PE_NS(1250) - 1 && k.eop.hi <= (int)(1.5e-6 * PE_CLK_HZ),
+       "EOP SE0 %.0f..%.0f cycles", k.eop.lo, k.eop.hi);
+  CRIT("K7", k.ipd.lo >= 2 && k.ipd.hi <= 7.5, "host handshake %.2f..%.2f bit times", k.ipd.lo, k.ipd.hi);
   no_errors(&b);
   printf("  %d packets; host %.0f b/s (%+.2f%%), EOP %.2f us, handshake %.1f-%.1f bit times after device EOP\n",
-         k.pkts, rate, (rate / 1.5e6 - 1) * 100, k.min_eop * 1e6 / PE_CLK_HZ, k.min_ipd, k.max_ipd);
+         k.pkts, rate, (rate / 1.5e6 - 1) * 100, k.eop.lo * 1e6 / PE_CLK_HZ, k.ipd.lo, k.ipd.hi);
 }
 
 /* ======================================================================== */
 /* 10BASE-T transmitter                                                      */
 
-static int eth_send(host *h, int eng, const uint8_t *payload, int n, uint8_t *wire, int *wl) {
-  uint8_t buf[1600];
-  int len = eth_udp_frame(buf + 2, payload, n);
-  int bits = 8 * len - 1;
-  buf[0] = (uint8_t)(bits >> 8);
-  buf[1] = (uint8_t)bits;
-  if (wire) {
-    memcpy(wire, buf + 2, (size_t)len);
-    *wl = len;
-  }
-  return host_stream(h, eng, buf, len + 2, NULL, 0, 4000000);
+static int eth_send(host *h, int eng, const uint8_t *payload, int n) {
+  uint8_t frame[1600];
+  int len = eth_udp_frame(frame, payload, n);
+  return host_frame(h, eng, (uint16_t)(8 * len - 1), frame, len, NULL, 0, 4000000);
 }
 
 static int eth_frame_ok(const uint8_t *f, int fl, const uint8_t *payload, int n) {
@@ -602,34 +591,35 @@ static void test_eth(void) {
 
   board_run(&b, (uint64_t)(0.050 * PE_CLK_HZ)); /* 50 ms idle */
   CRIT("E5", e.nlps >= 3, "%d link pulses in 50 ms", e.nlps);
-  CRIT("E5", e.nlp_wmin == PE_NS(100) && e.nlp_wmax == PE_NS(100), "pulse width %d..%d cycles", e.nlp_wmin, e.nlp_wmax);
-  CRIT("E5", e.nlp_gmin >= (uint64_t)(0.008 * PE_CLK_HZ) && e.nlp_gmax <= (uint64_t)(0.024 * PE_CLK_HZ),
-       "pulse spacing %.2f..%.2f ms", e.nlp_gmin * 1e3 / PE_CLK_HZ, e.nlp_gmax * 1e3 / PE_CLK_HZ);
-  double nlp_ms = e.nlp_gmin * 1e3 / PE_CLK_HZ;
+  CRIT("E5", e.nlp_width.lo == PE_NS(100) && e.nlp_width.hi == PE_NS(100), "pulse width %.0f..%.0f cycles",
+       e.nlp_width.lo, e.nlp_width.hi);
+  CRIT("E5", e.nlp_gap.lo >= 0.008 * PE_CLK_HZ && e.nlp_gap.hi <= 0.024 * PE_CLK_HZ,
+       "pulse spacing %.2f..%.2f ms", e.nlp_gap.lo * 1e3 / PE_CLK_HZ, e.nlp_gap.hi * 1e3 / PE_CLK_HZ);
+  double nlp_ms = e.nlp_gap.lo * 1e3 / PE_CLK_HZ;
 
   /* three frames queued back to back */
   const char *msgs[3] = {"hello from tiny tapeout", "frame two", "frame three, a bit longer"};
-  for (int i = 0; i < 3; i++) eth_send(&h, 1, (const uint8_t *)msgs[i], (int)strlen(msgs[i]), NULL, NULL);
+  for (int i = 0; i < 3; i++) eth_send(&h, 1, (const uint8_t *)msgs[i], (int)strlen(msgs[i]));
   host_wait(&h, 4000);
   int ok = e.nframes == 3;
   for (int i = 0; i < 3 && ok; i++)
     ok = eth_frame_ok(e.frame[i], e.flen[i], (const uint8_t *)msgs[i], (int)strlen(msgs[i]));
   CRIT("E2", ok && e.bad_pre == 0 && e.bad_fcs == 0 && e.bad_len == 0, "%d frames, %d bad FCS", e.nframes, e.bad_fcs);
   CRIT("E1", e.bad_manch == 0 && e.odd_bits == 0 && e.nframes == 3, "Manchester violations %d", e.bad_manch);
-  CRIT("E4", e.ifg_min >= PE_NS(9600), "interframe gap %d cycles", e.ifg_min);
+  CRIT("E4", e.ifg.lo >= PE_NS(9600), "interframe gap %.0f cycles", e.ifg.lo);
 
   /* maximum-size frame: 1500-byte IP packet */
   static uint8_t big[1472];
   for (int i = 0; i < 1472; i++) big[i] = (uint8_t)rnd();
-  ok = eth_send(&h, 1, big, 1472, NULL, NULL);
+  ok = eth_send(&h, 1, big, 1472);
   host_wait(&h, 2000);
   CRIT("E6", ok && e.nframes == 4 && e.flen[3] == 1518 && eth_frame_ok(e.frame[3], e.flen[3], big, 1472),
        "max frame: %d frames, length %d", e.nframes, e.nframes > 3 ? e.flen[3] : 0);
-  CRIT("E3", e.tpidl_min >= PE_NS(250), "TP_IDL %d cycles", e.tpidl_min);
+  CRIT("E3", e.tpidl.lo >= PE_NS(250), "TP_IDL %.0f cycles", e.tpidl.lo);
   no_errors(&b);
   printf("  %d frames, half-bit 50 ns, TP_IDL %d ns, gap >= %.1f us, link pulses %d ns every %.1f ms\n",
-         e.nframes, (int)(e.tpidl_min * 1e9 / PE_CLK_HZ), e.ifg_min * 1e6 / PE_CLK_HZ,
-         (int)(e.nlp_wmin * 1e9 / PE_CLK_HZ), nlp_ms);
+         e.nframes, (int)(e.tpidl.lo * 1e9 / PE_CLK_HZ), e.ifg.lo * 1e6 / PE_CLK_HZ,
+         (int)(e.nlp_width.lo * 1e9 / PE_CLK_HZ), nlp_ms);
   eth_rx_free(&e);
 }
 

@@ -5,7 +5,6 @@
  */
 #include "peers.h"
 
-#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,27 +13,23 @@
 /* UART                                                                      */
 /* ======================================================================== */
 
-static void uart_step(peer *pp, board *b, uint8_t wire) {
+static void uart_step(peer *pp, board *b, const wire_view *w) {
   uart_peer *u = (uart_peer *)pp;
   uint64_t c = b->cycle;
 
   if (u->rx_pin >= 0) {
-    uint8_t v = (wire >> u->rx_pin) & 1;
+    int v = wv_lvl(w, u->rx_pin);
+    bitgrid g = {(double)u->rstart, u->rx_period};
     if (u->rst == 0) {
-      if (u->rprev && !v) {
+      if (wv_fell(w, u->rx_pin)) {
         u->rst = 1;
         u->rstart = c;
         u->rbit = 0;
         u->rbyte = 0;
       }
     } else {
-      if (v != u->rprev) { /* edges must sit on the bit grid */
-        double e = (double)(c - u->rstart);
-        double k = floor(e / u->rx_period + 0.5);
-        double d = fabs(e - k * u->rx_period);
-        if (d > u->max_dev) u->max_dev = d;
-      }
-      if (c == u->rstart + (uint64_t)((u->rbit + 0.5) * u->rx_period)) {
+      if (wv_moved(w, u->rx_pin)) span_add(&u->edge_dev, bg_dev(&g, c)); /* edges sit on the grid */
+      if (c == bg_mid(&g, u->rbit)) {
         if (u->rbit == 0 && v) {
           u->rst = 0; /* glitch */
         } else if (u->rbit >= 1 && u->rbit <= 8) {
@@ -53,7 +48,6 @@ static void uart_step(peer *pp, board *b, uint8_t wire) {
         u->rbit++;
       }
     }
-    u->rprev = v;
   }
 
   if (u->tx_pin >= 0) {
@@ -65,7 +59,8 @@ static void uart_step(peer *pp, board *b, uint8_t wire) {
       u->tstart = c + 1;
     }
     if (u->tbusy) {
-      int bi = (int)floor((double)(c + 1 - u->tstart) / u->tx_period);
+      bitgrid g = {(double)u->tstart, u->tx_period};
+      int bi = bg_bit(&g, c + 1);
       if (bi == 0) level = 0;
       else if (bi <= 8) level = (u->tcur >> (bi - 1)) & 1;
       else if (bi == 9) level = (u->tcur & 0x100) ? 0 : 1;
@@ -74,8 +69,7 @@ static void uart_step(peer *pp, board *b, uint8_t wire) {
         u->tnext = c + (uint64_t)u->gap;
       }
     }
-    u->base.oe = (uint8_t)(1 << u->tx_pin);
-    u->base.out = (uint8_t)(level << u->tx_pin);
+    peer_drive(&u->base, u->tx_pin, true, level);
   }
 }
 
@@ -92,11 +86,7 @@ void uart_peer_init(uart_peer *u, int rx_pin, int tx_pin, double rx_period, doub
   u->tx_pin = tx_pin;
   u->rx_period = rx_period;
   u->tx_period = tx_period;
-  u->rprev = 1;
-  if (tx_pin >= 0) {
-    u->base.oe = (uint8_t)(1 << tx_pin);
-    u->base.out = (uint8_t)(1 << tx_pin);
-  }
+  if (tx_pin >= 0) peer_drive(&u->base, tx_pin, true, 1);
 }
 
 /* ======================================================================== */
@@ -141,23 +131,23 @@ static uint8_t flash_next_out(spi_flash *f, uint8_t in, int idx) {
   return 0xFF;
 }
 
-static void flash_step(peer *pp, board *b, uint8_t wire) {
+static void flash_step(peer *pp, board *b, const wire_view *w) {
   spi_flash *f = (spi_flash *)pp;
   uint64_t c = b->cycle;
-  uint8_t cs = (wire >> f->cs) & 1, sck = (wire >> f->sck) & 1, mosi = (wire >> f->mosi) & 1;
+  int cs = wv_lvl(w, f->cs), sck = wv_lvl(w, f->sck), mosi = wv_lvl(w, f->mosi);
   if (f->busy_until && c >= f->busy_until) f->busy_until = 0;
 
-  if (f->pcs && !cs) { /* select */
+  if (wv_fell(w, f->cs)) { /* select */
     f->frames++;
     f->nbyte = f->bitc = 0;
     f->outen = false;
     f->mode = sck ? 3 : 0;
-    if (f->cs_rise && (int)(c - f->cs_rise) < f->min_cs_high) f->min_cs_high = (int)(c - f->cs_rise);
+    span_since(&f->cs_high, c, f->cs_rise);
     f->last_rise = f->last_fall = 0;
     f->cs_fall = c;
     memset(f->pmask, 0, sizeof f->pmask);
   }
-  if (!f->pcs && cs) { /* deselect: execute write commands */
+  if (wv_rose(w, f->cs)) { /* deselect: execute write commands */
     if (f->bitc) board_error(b, "flash: CS rose after %d bits of a byte", f->bitc);
     bool busy = f->busy_until != 0;
     if (!busy && f->nbyte == 1 && f->cmd == 0x06) f->wel = true;
@@ -178,11 +168,10 @@ static void flash_step(peer *pp, board *b, uint8_t wire) {
     f->cs_rise = c;
   }
   if (!cs) {
-    if (!f->psck && sck) {
-      if (mosi != f->pmosi) board_error(b, "flash: MOSI changed on the SCK rising edge");
-      if (f->last_rise && (int)(c - f->last_rise) < f->min_period) f->min_period = (int)(c - f->last_rise);
-      if (f->last_rise && (int)(c - f->last_rise) > f->max_period) f->max_period = (int)(c - f->last_rise);
-      if (f->last_fall && (int)(c - f->last_fall) < f->min_low) f->min_low = (int)(c - f->last_fall);
+    if (wv_rose(w, f->sck)) {
+      if (wv_moved(w, f->mosi)) board_error(b, "flash: MOSI changed on the SCK rising edge");
+      span_since(&f->period, c, f->last_rise);
+      span_since(&f->low, c, f->last_fall);
       f->last_rise = c;
       f->rises++;
       f->sin = (uint8_t)(f->sin << 1 | mosi);
@@ -196,8 +185,8 @@ static void flash_step(peer *pp, board *b, uint8_t wire) {
         f->bytes++;
       }
     }
-    if (f->psck && !sck) {
-      if (f->last_rise && (int)(c - f->last_rise) < f->min_high) f->min_high = (int)(c - f->last_rise);
+    if (wv_fell(w, f->sck)) {
+      span_since(&f->high, c, f->last_rise);
       f->last_fall = c;
       if (f->outen) {
         f->miso_v = (f->sout >> 7) & 1;
@@ -208,11 +197,7 @@ static void flash_step(peer *pp, board *b, uint8_t wire) {
   /* MISO through an optional extra delay line (slower part / longer wires) */
   f->hist = (uint16_t)(f->hist << 2 | (!cs && f->outen) << 1 | f->miso_v);
   int d = (f->hist >> (2 * f->extra_lat)) & 3;
-  f->base.oe = (uint8_t)((d >> 1) << f->miso);
-  f->base.out = (uint8_t)((d & 1) << f->miso);
-  f->pcs = cs;
-  f->psck = sck;
-  f->pmosi = mosi;
+  peer_drive(&f->base, f->miso, d >> 1, d & 1);
 }
 
 void spi_flash_init(spi_flash *f, int cs, int mosi, int miso, int sck) {
@@ -225,8 +210,6 @@ void spi_flash_init(spi_flash *f, int cs, int mosi, int miso, int sck) {
   f->sck = sck;
   f->mem = malloc(FLASH_SIZE);
   memset(f->mem, 0xff, FLASH_SIZE);
-  f->pcs = 1;
-  f->min_period = f->min_high = f->min_low = f->min_cs_high = 1 << 30;
   f->tpp = PE_NS(400000);    /* 0.4 ms typical page program */
   f->tse = PE_NS(45000000);  /* 45 ms typical 4 KB sector erase */
 }
@@ -236,12 +219,6 @@ void spi_flash_init(spi_flash *f, int cs, int mosi, int miso, int sck) {
 /* ======================================================================== */
 
 enum { I_IDLE, I_ADDR, I_WDATA, I_RDATA, I_ACKOUT, I_ACKIN, I_IGNORE };
-
-
-static void tmin(int *m, uint64_t a, uint64_t b) {
-  int d = (int)(a - b);
-  if (d < *m) *m = d;
-}
 
 static void i2c_write_reg(i2c_adt7420 *d, uint8_t v) {
   uint8_t r = d->ptr;
@@ -253,20 +230,20 @@ static void i2c_write_reg(i2c_adt7420 *d, uint8_t v) {
   d->ptr++;
 }
 
-static void i2c_step(peer *pp, board *b, uint8_t wire) {
+static void i2c_step(peer *pp, board *b, const wire_view *w) {
   i2c_adt7420 *d = (i2c_adt7420 *)pp;
   uint64_t c = b->cycle;
-  uint8_t scl = (wire >> d->scl) & 1, sda = (wire >> d->sda) & 1;
+  int scl = wv_lvl(w, d->scl), sda = wv_lvl(w, d->sda);
 
-  if (sda != d->psda) {
-    if (scl && d->pscl) {
+  if (wv_moved(w, d->sda)) {
+    if (scl && wv_was(w, d->scl)) {
       if (!sda) { /* START */
         /* a repeated START follows one SCL rise; later ones are mid-byte */
         if (d->bit >= 2 && (d->st == I_ADDR || d->st == I_WDATA || d->st == I_RDATA))
           board_error(b, "i2c: START inside a byte");
         d->starts++;
-        if (d->t_rise) tmin(&d->min_susta, c, d->t_rise);
-        if (d->t_stop) tmin(&d->min_buf, c, d->t_stop);
+        span_since(&d->susta, c, d->t_rise);
+        span_since(&d->buf, c, d->t_stop);
         d->t_start = c;
         d->after_start = true;
         d->st = I_ADDR;
@@ -277,7 +254,7 @@ static void i2c_step(peer *pp, board *b, uint8_t wire) {
         if (d->bit >= 2 && (d->st == I_ADDR || d->st == I_WDATA || d->st == I_RDATA))
           board_error(b, "i2c: STOP inside a byte");
         d->stops++;
-        if (d->t_rise) tmin(&d->min_susto, c, d->t_rise);
+        span_since(&d->susto, c, d->t_rise);
         d->t_stop = c;
         d->st = I_IDLE;
         d->sda_low = false;
@@ -288,10 +265,10 @@ static void i2c_step(peer *pp, board *b, uint8_t wire) {
     }
   }
 
-  if (!d->pscl && scl) { /* rising */
-    if (d->t_fall) tmin(&d->min_low, c, d->t_fall);
-    if (d->sda_moved && d->t_fall) tmin(&d->min_sudat, c, d->t_sda);
-    if (d->last_rise_p && !d->stretched) tmin(&d->min_period, c, d->last_rise_p);
+  if (wv_rose(w, d->scl)) {
+    span_since(&d->low, c, d->t_fall);
+    if (d->sda_moved && d->t_fall) span_add(&d->sudat, (double)(c - d->t_sda));
+    if (!d->stretched) span_since(&d->period, c, d->last_rise_p);
     d->last_rise_p = c;
     d->stretched = false;
     d->t_rise = c;
@@ -307,10 +284,10 @@ static void i2c_step(peer *pp, board *b, uint8_t wire) {
     }
   }
 
-  if (d->pscl && !scl) { /* falling */
-    if (d->t_rise) tmin(&d->min_high, c, d->t_rise);
+  if (wv_fell(w, d->scl)) {
+    span_since(&d->high, c, d->t_rise);
     if (d->after_start) {
-      tmin(&d->min_hdsta, c, d->t_start);
+      span_add(&d->hdsta, (double)(c - d->t_start));
       d->after_start = false;
     }
     d->t_fall = c;
@@ -387,10 +364,8 @@ static void i2c_step(peer *pp, board *b, uint8_t wire) {
   }
 
   if (d->scl_low && c >= d->stretch_until) d->scl_low = false;
-  d->base.oe = (uint8_t)((d->sda_low ? 1 << d->sda : 0) | (d->scl_low ? 1 << d->scl : 0));
-  d->base.out = 0;
-  d->pscl = scl;
-  d->psda = sda;
+  peer_drive(&d->base, d->sda, d->sda_low, 0);
+  peer_drive(&d->base, d->scl, d->scl_low, 0);
 }
 
 void i2c_adt7420_init(i2c_adt7420 *d, int scl, int sda, uint8_t addr) {
@@ -400,7 +375,6 @@ void i2c_adt7420_init(i2c_adt7420 *d, int scl, int sda, uint8_t addr) {
   d->scl = scl;
   d->sda = sda;
   d->addr = addr;
-  d->pscl = d->psda = 1;
   /* power-on register values, 25.0 C */
   d->regs[0x00] = 0x0C;
   d->regs[0x01] = 0x80;
@@ -410,6 +384,4 @@ void i2c_adt7420_init(i2c_adt7420 *d, int scl, int sda, uint8_t addr) {
   d->regs[0x09] = 0x80;
   d->regs[0x0A] = 0x05;
   d->regs[0x0B] = 0xCB;
-  d->min_low = d->min_high = d->min_sudat = d->min_hdsta = d->min_susta = d->min_susto =
-      d->min_buf = d->min_period = 1 << 30;
 }

@@ -10,6 +10,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "prim.h"
+
 /* ---- Architectural limits (the numbers the RTL must implement) ---------- */
 #define PE_CORES 4       /* engines on the chip                              */
 #define PE_IMEM 32       /* 16-bit instruction words per engine              */
@@ -144,7 +146,7 @@ typedef struct {
 struct board;
 typedef struct peer {
   const char *name;
-  void (*step)(struct peer *p, struct board *b, uint8_t wire);
+  void (*step)(struct peer *p, struct board *b, const wire_view *w);
   uint8_t oe, out;        /* drive for the next cycle                      */
 } peer;
 

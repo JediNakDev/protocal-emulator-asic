@@ -34,9 +34,10 @@ The clock is 40 MHz, the lowest rate that gives 10BASE-T an integer number of cy
 | `chip.c` | Engines (`core_step`), host bus, pad logic with 2-FF synchronisers |
 | `board.c` | Wire resolution with pull-ups and pull-downs, contention checks, cycle loop |
 | `asm.c` | Two-pass assembler for `.pasm` sources |
-| `host.c` | RP2040 host model: bus transactions, program loader, FIFO streaming |
+| `prim.h` | Measurement primitives shared by the peers: timing spans, wire edges, bit grids |
+| `host.c` | RP2040 host model: bus transactions, program loader, FIFO streaming, length-prefixed frames |
 | `proto.c` | CRC-5/16/32, USB line coding, Ethernet/IPv4/UDP framing (host side, checked against published values) |
-| `peers.c` | USB-UART bridge, W25Q128JV flash, ADT7420 sensor |
+| `peers.c` | USB-UART bridge, W25Q128JV flash, ADT7420 sensor (`peers.h` also has `peer_drive`) |
 | `peers_net.c` | USB low-speed keyboard, 10BASE-T receiver |
 | `programs/*.pasm` | Protocol firmware |
 | `test_main.c` | Test suite, organised by criterion |

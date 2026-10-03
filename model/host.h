@@ -33,5 +33,9 @@ void host_clear_flags(host *h, int mask);
 /* stream tx[] into an engine while collecting nrx bytes back */
 int host_stream(host *h, int eng, const uint8_t *tx, int ntx, uint8_t *rx, int nrx,
                 uint64_t timeout);
+/* the same, preceded by a 16-bit header, high byte first: the framing of the
+ * programs that load a count with two "out x, 8" (spi, usb, eth) */
+int host_frame(host *h, int eng, uint16_t hdr, const uint8_t *tx, int ntx, uint8_t *rx, int nrx,
+               uint64_t timeout);
 
 #endif
