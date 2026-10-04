@@ -203,13 +203,14 @@ def _encode(line, labels, defines, side_count, side_opt):
             addr = _num(target, defines)
         base = ((c >> 2) << 13) | ((c & 3) << 6) | (addr & 0x3F)
     elif op == "wait":
-        if len(words) < 2:
+        toks = args.split()
+        if len(toks) < 2:
             raise AsmError(f"bad wait: {line}")
-        pol = _num(words[0], defines)
-        src = words[1]
+        pol = _num(toks[0], defines)
+        src = toks[1].lower()
         if src not in WAIT_SRC:
             raise AsmError(f"bad wait source {src}")
-        idx = 0 if src == "pattern" else _num(words[2], defines)
+        idx = 0 if src == "pattern" else _num(toks[2], defines)
         base = (2 << 13) | ((pol & 1) << 7) | (WAIT_SRC[src] << 5) | (idx & 0x1F)
     elif op == "in":
         src, n = a[0].lower(), _num(a[1], defines)
@@ -228,10 +229,10 @@ def _encode(line, labels, defines, side_count, side_opt):
         base = (5 << 13) | (sub << 6) | (flag << 5) | (block << 4)
     elif op == "irq":
         clr, wait = 0, 0
-        toks = words
-        if toks and toks[0] in ("set", "wait", "clear"):
-            clr = toks[0] == "clear"
-            wait = toks[0] == "wait"
+        toks = args.split()
+        if toks and toks[0].lower() in ("set", "wait", "clear"):
+            clr = toks[0].lower() == "clear"
+            wait = toks[0].lower() == "wait"
             toks = toks[1:]
         if len(toks) != 1:
             raise AsmError(f"bad irq: {line}")

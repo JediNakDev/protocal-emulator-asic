@@ -22,7 +22,8 @@ The Host reaches every register through an SPI-style port, 1 bit wide after rese
 
 Run `make setup` once, then `make check` from the repository root.
 The cocotb tests drive only the top-level pins: they load programs through the Host port and check protocol behavior with independent peer models.
-They cover the Host port, instruction timing, UART transmit and receive, SPI controller mode 0, I2C controller writes with clock stretching, CRC-32, CRC-16, scrambling, PRBS generation, Manchester encoding, NRZI decoding, edge capture and the input options.
+They cover the Host port, instruction timing, the general building blocks, and protocol programs for UART, SPI, I2C, JTAG, SWD, PS/2, CAN, low-speed USB and 10BASE-T.
+[Protocol programs](protocols.md) lists what each program does, what was verified and the limits found.
 
 On the demo board, the RP2040 acts as Host:
 

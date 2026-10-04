@@ -19,9 +19,18 @@ HALF = 4     # HSCK half period in clk cycles, the specified minimum
 HCS_N, HSCK = 0, 1
 
 
+PROGRAMS = os.path.join(os.path.dirname(__file__), "..", "programs")
+
+
+def program_source(name):
+    with open(os.path.join(PROGRAMS, name + ".pasm")) as f:
+        return f.read()
+
+
 class Chip:
-    def __init__(self, dut):
+    def __init__(self, dut, clk_ps=CLK_NS * 1000):
         self.dut = dut
+        self.clk_ps = clk_ps
         self.quad = False
         self.ui = 0x01  # HCS_N high
         # Shadows: cocotb applies writes later, so reading back a signal
@@ -31,7 +40,7 @@ class Chip:
 
     # ------------------------------------------------------------- basics
     async def start(self):
-        cocotb.start_soon(Clock(self.dut.clk, CLK_NS, unit="ns").start())
+        cocotb.start_soon(Clock(self.dut.clk, self.clk_ps, unit="ps").start())
         self.dut.ena.value = 1
         self.dut.ext_oe.value = 0
         self.dut.ext_out.value = 0
@@ -159,6 +168,10 @@ class Chip:
     async def eread(self, e, off, n=1):
         return await self.read(regs.engine_reg(e, off), n)
 
+    async def load_program(self, name, offset=0):
+        """Load programs/<name>.pasm."""
+        return await self.load(program_source(name), offset)
+
     async def load(self, prog, offset=0):
         """Write a Program (or source text) to instruction memory."""
         if isinstance(prog, str):
@@ -217,6 +230,28 @@ class Chip:
                 if waited > timeout:
                     raise TimeoutError(f"engine {e}: got {len(out)} of {n} words")
         return out
+
+    async def stream(self, e, tx, n_rx, depth=4, timeout=400000):
+        """Feed `tx` words into engine e's transmit queue while collecting n_rx
+        receive words, as a Host with flow control would."""
+        rx, i, idle = [], 0, 0
+        while i < len(tx) or len(rx) < n_rx:
+            txl, rxl = await self.levels(e)
+            progress = False
+            if rxl and len(rx) < n_rx:
+                rx += await self.pop(e, min(rxl, n_rx - len(rx)))
+                progress = True
+            free = depth - txl
+            if free > 0 and i < len(tx):
+                await self.push(e, tx[i:i + free])
+                i += free
+                progress = True
+            if not progress:
+                await self.cycles(20)
+                idle += 20
+                if idle > timeout:
+                    raise TimeoutError(f"engine {e}: sent {i}/{len(tx)}, got {len(rx)}/{n_rx}")
+        return rx
 
     async def dbg(self, e, sel):
         await self.write(regs.DBG_SEL, sel)
