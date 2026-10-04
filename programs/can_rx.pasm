@@ -3,12 +3,12 @@
 ; G2: tools/pe/g2.can_destuffer table, owned by this engine, stepping on the
 ;   feed, emitting into the ISR; G2_IN0 = feed bit. G2_STATE starts at 0.
 ; Pins: INPIN base = RXD; jmp pin = 14 (G2 out1: six equal bits).
-; Config: autopush 16, in shifting left, out shifting right; CLKDIV 0;
+; Config: autopush 15, in shifting left, out shifting right; CLKDIV 0;
 ;   50 cycles per bit (1 Mbit/s at 50 MHz). Bits are sampled 36 cycles (72%) after the
 ;   start-of-frame edge; there is no resynchronization within a frame.
-; Receive words: the destuffed bits from start of frame on, first bit in
-;   bit 15; the last data word ends with a 1 marker and zero padding; then
-;   0xFFFF separates frames (16 ones cannot occur in stuffed data).
+; Receive words: 15 destuffed bits per word, first bit in bit 14, bit 15 zero.
+;   The last data word ends with a 1 marker and zero padding; then 0xFFFF
+;   separates frames. The reserved top bit keeps every payload distinct.
 .define RXD 8
 .wrap_target
 idle:
@@ -25,7 +25,7 @@ bit:
 done:
     mov osr, ~null
     in osr, 1                  ; end marker
-    set x, 15
+    set x, 14
 pad:
     in null, 1                 ; flush the marker with autopush
     jmp x-- pad

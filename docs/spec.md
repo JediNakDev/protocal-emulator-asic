@@ -107,6 +107,8 @@ After each data byte, the address increments by one, except at **port** addresse
 Port addresses are 16 bits wide and transfer the low byte first, then the high byte.
 A port write takes effect when its high byte arrives.
 A port read takes effect (for example a FIFO pop) only after its high byte has been completely shifted out, so a transaction cut short never loses data.
+Receive queue reads snapshot the complete word and empty status when the low byte is fetched.
+An initially empty read returns zero and sets the underflow sticky bit after the high byte completes, without consuming a word that arrived during the transfer.
 The low/high byte toggle resets at every command byte.
 
 | `STATUS` bit | Meaning |

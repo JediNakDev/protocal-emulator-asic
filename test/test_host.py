@@ -3,7 +3,7 @@
 
 import cocotb
 
-from chip import Chip, regs
+from chip import Chip, HALF, regs
 
 
 @cocotb.test()
@@ -135,3 +135,47 @@ async def test_interrupted_read_keeps_data(dut):
     assert await chip.levels(0) == (0, 2)
     assert await chip.pop(0, 2) == [21, 9]
     assert await chip.levels(0) == (0, 0)
+
+
+@cocotb.test()
+@cocotb.parametrize(quad=[False, True], arrival_byte=[1, 2], engine=[0, 1])
+async def test_empty_fifo_read_during_arrival(dut, quad, arrival_byte, engine):
+    """An empty read must not consume a word arriving during either byte."""
+    chip = Chip(dut)
+    await chip.start()
+    if quad:
+        await chip.set_quad()
+    prog = await chip.load("wait 1 gpio 8\nmov isr, ~x\npush block\nwait 1 gpio 9")
+    await chip.setup_engine(engine, prog)
+    await chip.force_asm(engine, "set x, 31")
+    await chip.enable(1 << engine)
+    assert await chip.levels(engine) == (0, 0)
+
+    # Keep one transaction open while the peer triggers the receive word.
+    chip._set_host(0, 0, 0)
+    await chip.cycles(HALF)
+    got = []
+    command = 0x80 | regs.engine_reg(engine, regs.FIFO)
+    for byte_index, byte in enumerate([command, 0, 0]):
+        groups = [byte >> 4, byte & 15] if quad else [(byte >> i) & 1 for i in range(7, -1, -1)]
+        value = 0
+        for group_index, group in enumerate(groups):
+            chip._set_host(0, 0, group)
+            await chip.cycles(HALF)
+            hdo = chip._hdo()
+            value = (value << 4) | hdo if quad else (value << 1) | (hdo & 1)
+            chip._set_host(0, 1, group)
+            await chip.cycles(HALF)
+            if byte_index == arrival_byte and group_index == 0:
+                chip.set_pin8(1)
+        got.append(value)
+    chip._set_host(0, 0, 0)
+    await chip.cycles(HALF)
+    chip._set_host(1, 0, 0)
+    await chip.cycles(HALF)
+
+    assert got[1:] == [0, 0], got
+    assert await chip.levels(engine) == (0, 1)
+    assert await chip.read8(regs.STICKY) == regs.STK_RX_UNF0 << engine
+    assert await chip.pop(engine) == [0xFFE0]
+    assert await chip.levels(engine) == (0, 0)

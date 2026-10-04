@@ -27,6 +27,11 @@ They do not cover pad timing, metastability, clock duty cycle or analog front en
 
 The largest pair that must run together, CAN transmit plus receive, uses 35 of the 64 instruction words.
 
+CAN receive requires a push threshold of 15 and shifts left, packing each data word into bits 14:0 with bit 15 clear.
+The final data word contains a 1 marker followed by zero padding, and `0xFFFF` separates records.
+This framing preserves all payload values after destuffing, including consecutive `0xFF` bytes.
+The Host decodes these records with `tools/pe/proto/can.py`.
+
 ## Limits found during verification
 
 These came out of writing and testing the programs; each is a property of the current design, not of the test.

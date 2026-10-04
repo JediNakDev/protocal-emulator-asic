@@ -162,7 +162,8 @@ async def setup(dut, node):
     await chip.setup_engine(0, tx, 0, shiftctrl=regs.AUTOPULL | regs.OUT_RIGHT, set_base=TXD,
                             in_base=RXD, jmp_pin=RXD, execcfg=tx.label("table"))
     await chip.setup_engine(1, rx, len(tx), shiftctrl=regs.AUTOPUSH | regs.OUT_RIGHT
-                            | regs.fifo_mode(regs.FIFO_JOIN_RX), in_base=RXD, jmp_pin=regs.PIN_G2_OUT1)
+                            | regs.fifo_mode(regs.FIFO_JOIN_RX), thresh=15,
+                            in_base=RXD, jmp_pin=regs.PIN_G2_OUT1)
     await chip.write(regs.G2_ADDR, 0)
     await chip.write(regs.G2_DATA, g2lib.can_destuffer())
     await chip.write(regs.G2_IN0, [regs.G2_SRC_FEED_BIT, regs.G2_SRC_FEED_BIT])
@@ -200,6 +201,19 @@ async def test_can_receive(dut):
     frames = await receive_frames(chip, 2)
     assert frames[0] == (0x123, bytes([0x00, 0x00, 0xFF, 0xFF, 0xA5]), True), frames
     assert frames[1] == (0x7FF, bytes([0x55] * 8), True), frames
+
+
+@cocotb.test()
+async def test_can_receive_separator_payload(dut):
+    """Destuffed all-ones words must remain payload, across frame boundaries."""
+    node = CanNode()
+    chip = await setup(dut, node)
+    expected = [(0x123, b"\xff" * 8, True),
+                (0x456, b"\xff\xff\xff\x00\xff\xff\xff\xff", True),
+                (0x7FF, b"", True)]
+    for ident, payload, _ in expected:
+        node.pending.append((ident, payload, False))
+    assert await receive_frames(chip, len(expected)) == expected
 
 
 @cocotb.test()

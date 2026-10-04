@@ -20,6 +20,7 @@ module pe_engine #(
     input  wire        bus_hi,
     input  wire        bus_we,
     input  wire        bus_commit,
+    input  wire        bus_fetch,
     output reg  [7:0]  bus_rdata,
     // Global control
     input  wire        enable,
@@ -222,6 +223,23 @@ module pe_engine #(
   reg  [15:0] e_rx_data, e_ram_wdata;
   reg         rx_drop;
 
+  // The Host holds the low byte; hold its matching high byte and empty state.
+  // An empty read must not consume a word that arrives during the transfer.
+  reg [7:0]  rx_read_hi;
+  reg        rx_read_empty;
+  wire       rx_read_commit = bus_commit & hit & bus_hi & (off == 5'h10);
+  wire       h_rx_unf;
+
+  always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      rx_read_hi    <= 8'd0;
+      rx_read_empty <= 1'b1;
+    end else if (bus_fetch && hit && !bus_hi && off == 5'h10) begin
+      rx_read_hi    <= rx_head[15:8];
+      rx_read_empty <= rx_empty;
+    end
+  end
+
   pe_fifo u_fifo (
       .clk        (clk),
       .rst_n      (rst_n),
@@ -229,14 +247,14 @@ module pe_engine #(
       .mode       (fifo_mode),
       .h_tx_push  (wr & bus_hi & (off == 5'h10)),
       .h_tx_data  ({bus_wdata, bus_lo_hold}),
-      .h_rx_pop   (bus_commit & hit & bus_hi & (off == 5'h10)),
+      .h_rx_pop   (rx_read_commit & ~rx_read_empty),
       .h_rx_data  (rx_head),
       .h_ram_we   (h_ram_we),
       .h_ram_idx  (ram_addr),
       .h_ram_wdata({bus_wdata, bus_lo_hold}),
       .h_ram_rdata(ram_rdata_h),
       .h_tx_drop  (st_host_tx_ovf),
-      .h_rx_unf   (st_host_rx_unf),
+      .h_rx_unf   (h_rx_unf),
       .e_tx_pop   (e_tx_pop),
       .e_tx_data  (tx_data),
       .e_rx_push  (e_rx_push),
@@ -256,6 +274,7 @@ module pe_engine #(
   assign rx_nonempty = ~rx_empty;
   assign tx_notfull  = ~tx_full;
   assign st_rx_ovf   = rx_drop;
+  assign st_host_rx_unf = h_rx_unf | (rx_read_commit & rx_read_empty);
 
   assign pc_o = pc;
 
@@ -804,7 +823,7 @@ module pe_engine #(
         5'h0D: bus_rdata = {1'b0, cap_flag_en, cap_edge, cap_pin};
         5'h0E: bus_rdata = {5'b00000, cap_flag};
         5'h0F: bus_rdata = bus_hi ? dbg[15:8] : dbg[7:0];
-        5'h10: bus_rdata = bus_hi ? rx_head[15:8] : rx_head[7:0];
+        5'h10: bus_rdata = bus_hi ? rx_read_hi : rx_head[7:0];
         5'h11: bus_rdata = {rx_level, tx_level};
         5'h12: bus_rdata = {5'b00000, ram_addr};
         5'h13: bus_rdata = bus_hi ? ram_rdata_h[15:8] : ram_rdata_h[7:0];

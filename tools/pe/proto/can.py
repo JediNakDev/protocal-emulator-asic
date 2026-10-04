@@ -51,11 +51,11 @@ def tx_words(ident, data):
 
 
 def split_records(words):
-    """Split can_rx receive words into per-frame bit lists."""
+    """Split 15-bit can_rx data words, terminated by the 0xFFFF separator."""
     records, cur = [], []
     for w in words:
         if w == 0xFFFF:
-            bits = [(x >> (15 - i)) & 1 for x in cur for i in range(16)]
+            bits = [(x >> (14 - i)) & 1 for x in cur for i in range(15)]
             while bits and bits[-1] == 0:
                 bits.pop()
             if bits:
