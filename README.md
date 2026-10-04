@@ -42,6 +42,15 @@ make clean  # Remove simulation outputs
 Simulation saves the waveform to `test/tb.fst` and the JUnit report to `test/results.xml`.
 Open the waveform in the Surfer VS Code extension, or a separately installed GTKWave.
 
+## Earlier C architecture model
+
+[model/](model/README.md) preserves the earlier four-engine architecture exploration at 40 MHz.
+UART, SPI and I2C, plus USB low-speed host and 10BASE-T transmit, run there as engine programs.
+They are checked by models of real parts (USB-UART bridge, W25Q128JV flash, ADT7420 sensor, USB keyboard, 10BASE-T receiver) against the pass criteria in [model/CRITERIA.md](model/CRITERIA.md).
+Its ISA, Host interface and resource budget differ from the implemented two-engine RTL defined in [docs/spec.md](docs/spec.md).
+Its results apply to that earlier model; it is not a reference model for the current RTL.
+Run it with `make model`.
+
 ## Where to work
 
 - [docs/spec.md](docs/spec.md): pinout, register map, instruction set and timing; the RTL must match it.

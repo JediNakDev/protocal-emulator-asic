@@ -14,3 +14,5 @@ test/__pycache__/
 test/results.xml
 test/gate_level_netlist.v
 __pycache__/
+model/pe_test
+model/pe_test.dSYM/
