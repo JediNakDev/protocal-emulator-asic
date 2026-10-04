@@ -31,14 +31,13 @@ module pe_pins (
     output wire [15:0] pins_in
 );
 
-  integer i;
-
   reg [7:0] cfg [0:12];
   reg [3:0] negsel;
 
   wire wr = bus_we & (bus_addr[6:5] == 2'b01) & (bus_addr[4:0] < 5'd13);
 
-  always @(posedge clk or negedge rst_n) begin
+  always @(posedge clk or negedge rst_n) begin : config_regs
+    integer i;
     if (!rst_n) begin
       for (i = 0; i < 13; i = i + 1) cfg[i] <= 8'h00;
       negsel <= 4'd0;
@@ -56,7 +55,8 @@ module pe_pins (
   reg  [9:0] path;      // after the synchronizer or bypass
   reg  [9:0] in_val;    // after the filter
 
-  always @(*) begin
+  always @(*) begin : input_path
+    integer i;
     for (i = 0; i < 10; i = i + 1) begin
       path[i]   = cfg[i][5] ? raw[i] : sync2[i];
       in_val[i] = (cfg[i][7:6] == 2'd0) ? path[i] : filt[i];
@@ -74,7 +74,8 @@ module pe_pins (
     end
   endfunction
 
-  always @(posedge clk or negedge rst_n) begin
+  always @(posedge clk or negedge rst_n) begin : input_regs
+    integer i;
     if (!rst_n) begin
       sync1 <= 10'd0;
       sync2 <= 10'd0;
@@ -112,7 +113,8 @@ module pe_pins (
   reg [12:0] drv_oe;
   reg        v, d;
 
-  always @(*) begin
+  always @(*) begin : output_path
+    integer i;
     for (i = 0; i < 13; i = i + 1) begin
       case (cfg[i][1:0])
         2'd0: begin v = e0_out[i]; d = e0_dir[i]; end
