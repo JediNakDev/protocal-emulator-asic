@@ -1,6 +1,7 @@
 .DEFAULT_GOAL := help
 
 TOP_MODULE := tt_um_jedinakdev_protocol_emulator
+RTL_SOURCES := $(addprefix src/,project.v pe_host.v pe_global.v pe_imem.v pe_store.v pe_pins.v pe_g2.v pe_engine.v pe_fifo.v pe_lfsr.v)
 export PATH := $(CURDIR)/.venv/bin:$(PATH)
 
 .PHONY: help setup test lint check clean
@@ -20,7 +21,8 @@ test:
 	$(MAKE) -C test
 
 lint:
-	verilator --lint-only --Wall -Wno-DECLFILENAME --top-module $(TOP_MODULE) -Isrc src/project.v
+	verilator --lint-only --Wall -Wno-DECLFILENAME --top-module $(TOP_MODULE) -Isrc $(RTL_SOURCES)
+	verilator --lint-only --Wall -Wno-DECLFILENAME -DPE_LATCH_STORE --top-module $(TOP_MODULE) -Isrc $(RTL_SOURCES)
 
 check: lint test
 

@@ -1,8 +1,8 @@
 # Programmable Protocol Emulator ASIC
 
 Starter workspace for [Jane Street's protocol emulator ASIC competition](https://blog.janestreet.com/protocol-emulator-asic-competition/), based on the [Tiny Tapeout CMOS5L Verilog template](https://github.com/TinyTapeout/ttihp-verilog-template/tree/cmos5l).
-The current RTL is the template's 8-bit adder, retained as a toolchain smoke test.
-The programmable emulator has not been implemented yet.
+The RTL implements the programmable emulator defined in [docs/spec.md](docs/spec.md): two engines, a shared bit state machine, checksum and capture units, and a Host port.
+UART, SPI and I2C run as programs in simulation; the design has not yet been through a CMOS5L GDS build.
 
 ## Competition configuration
 
@@ -44,12 +44,18 @@ Open the waveform in the Surfer VS Code extension, or a separately installed GTK
 
 ## Where to work
 
-- [src/project.v](src/project.v): Tiny Tapeout top-level wrapper and starter RTL.
+- [docs/spec.md](docs/spec.md): pinout, register map, instruction set and timing; the RTL must match it.
+- [src/project.v](src/project.v): Tiny Tapeout top-level wrapper; the other `src/pe_*.v` files are its blocks.
 - [info.yaml](info.yaml): metadata, tile allocation, source list, and pin descriptions.
 - [src/config.json](src/config.json): physical implementation settings.
-- [test/test.py](test/test.py): cocotb tests driven through the external chip interface.
-- [test/tb.v](test/tb.v): simulation wrapper.
+- [tools/pe](tools/pe): assembler, register map and bit state machine table builder.
+- [test/chip.py](test/chip.py): cocotb Host model that drives only the top-level pins.
+- [test/peers.py](test/peers.py): independent UART, SPI and I2C peer models.
+- `test/test_*.py`: cocotb tests; [test/tb.v](test/tb.v) models pull-ups and open-drain peers.
 - [docs/info.md](docs/info.md): project datasheet source.
+- [docs/area-log.md](docs/area-log.md): area and timing measurements.
+
+`make test LATCH=yes` runs the same suite on the latch storage build.
 
 When adding RTL files, list each one in `info.yaml` and `test/Makefile`, and include it in the root Makefile's lint command.
 Update the pin descriptions and datasheet when the emulator interface is defined.
@@ -73,9 +79,9 @@ The [general local-hardening guide](https://tinytapeout.com/guides/local-hardeni
 
 Read the [competition roadmap](docs/roadmap.md) for the goal, first UART task, architecture questions, phases, completion criteria, and suggested timeline.
 
-1. Implement a UART transmitter and verify decoded bytes and bit timing through the top-level pins.
-2. Make pin operations and waits programmable, with a way to load programs after fabrication.
-3. Implement UART, SPI, and I2C as programs and verify them against independent protocol models.
-4. Run GDS builds regularly and track area, timing, and routing as the architecture grows.
+1. Run the CMOS5L GDS build and record real area, routing and timing in the area log.
+2. Write paper programs for low-speed USB and 10 Mbit Ethernet and check them against the instruction memory size.
+3. Extend the verification: an independent instruction-level model with randomized program comparison.
+4. Decide between flip-flop and latch storage from gate-level results on CMOS5L.
 
 Fill out the update sign-up form linked in the [competition announcement](https://blog.janestreet.com/protocol-emulator-asic-competition/) to receive deadline and submission updates.
