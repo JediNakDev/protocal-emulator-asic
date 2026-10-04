@@ -6,82 +6,6 @@ import cocotb
 from chip import Chip, regs
 from peers import I2CTarget, spi_peripheral, uart_receive, uart_transmit
 
-UART_TX = """
-.program uart_tx
-.side_set 1 opt
-    pull       side 1 [7]   ; idle high while waiting for data
-    set x, 7   side 0 [7]   ; start bit
-bitloop:
-    out pins, 1
-    jmp x-- bitloop [6]
-"""
-
-UART_RX = """
-.program uart_rx
-start:
-    wait 0 pin 0            ; start bit edge
-    set x, 7 [10]           ; to the middle of data bit 0
-bitloop:
-    in pins, 1
-    jmp x-- bitloop [6]
-    jmp pin good            ; stop bit must be high
-    irq set 4               ; framing error
-    wait 1 pin 0
-    jmp start
-good:
-    push
-"""
-
-SPI_FAST = """
-.program spi_mode0_fast
-.side_set 1
-    out pins, 1 side 0 [1]
-    in pins, 1  side 1 [1]
-"""
-
-SPI_SLOW = """
-.program spi_mode0
-.side_set 1
-    out pins, 1 side 0 [3]
-    in pins, 1  side 1 [3]
-"""
-
-I2C_WRITE = """
-.program i2c_write
-; Word from the Host: bit 15 START before the byte, bits 14:7 the byte,
-; bit 6 STOP after it. One receive word per byte: bit 0 is the ACK level.
-.side_set 1 opt
-.wrap_target
-next:
-    pull block
-    out x, 1
-    jmp !x data
-    set pins, 1        [3]   ; release SDA
-    nop         side 1 [3]   ; release SCL
-    wait 1 pin 1       [3]   ; SCL high, after any stretching
-    set pins, 0        [3]   ; START
-    nop         side 0 [3]
-data:
-    set y, 7
-bit:
-    out pins, 1        [3]   ; SDA changes only while SCL is low
-    nop         side 1 [3]
-    wait 1 pin 1       [3]
-    jmp y-- bit side 0 [3]
-    set pins, 1        [3]   ; release SDA for the ACK
-    nop         side 1 [3]
-    wait 1 pin 1       [3]
-    in pins, 1
-    push block  side 0 [3]
-    out x, 1
-    jmp !x next
-    set pins, 0        [3]
-    nop         side 1 [3]
-    wait 1 pin 1       [3]
-    set pins, 1        [7]   ; STOP
-.wrap
-"""
-
 
 async def new_chip(dut):
     chip = Chip(dut)
@@ -94,7 +18,7 @@ async def new_chip(dut):
 async def test_uart_tx(dut):
     chip = await new_chip(dut)
     chip.pull_up(0x01)
-    prog = await chip.load(UART_TX)
+    prog = await chip.load_program("uart_tx")
     await chip.setup_engine(0, prog, clkdiv=1, shiftctrl=regs.OUT_RIGHT, out_base=0, side_base=0)
     await chip.force_asm(0, "set pins, 1\nset pindirs, 1", side_count=1, side_opt=True)
     await chip.pincfg(0, regs.DRIVE_PUSH_PULL)
@@ -111,7 +35,7 @@ async def test_uart_tx(dut):
 async def test_uart_rx(dut):
     chip = await new_chip(dut)
     chip.set_pin8(1)
-    prog = await chip.load(UART_RX)
+    prog = await chip.load_program("uart_rx")
     await chip.setup_engine(0, prog, clkdiv=1, shiftctrl=regs.IN_RIGHT, in_base=8, jmp_pin=8)
     await chip.enable(1)
     data = [0x00, 0xFF, 0x55, 0xA3, 0x7E]
@@ -126,9 +50,9 @@ async def test_uart_rx(dut):
     assert await chip.levels(0) == (0, 0)
 
 
-async def spi_run(dut, src, bypass, data_out, data_in):
+async def spi_run(dut, program_name, bypass, data_out, data_in):
     chip = await new_chip(dut)
-    prog = await chip.load(src)
+    prog = await chip.load_program(program_name)
     await chip.setup_engine(0, prog, shiftctrl=regs.AUTOPULL | regs.AUTOPUSH,
                             thresh=8 | (8 << 4), out_base=0, in_base=9, side_base=1)
     await chip.ereg(0, regs.SETPIN, 0 | (2 << 4))
@@ -152,14 +76,14 @@ async def spi_run(dut, src, bypass, data_out, data_in):
 
 @cocotb.test()
 async def test_spi_controller_mode0(dut):
-    await spi_run(dut, SPI_SLOW, False, [0x9F, 0x00, 0xA5, 0x3C, 0xFF, 0x81],
+    await spi_run(dut, "spi_mode0", False, [0x9F, 0x00, 0xA5, 0x3C, 0xFF, 0x81],
                   [0x5A, 0xC3, 0x01, 0x80, 0x7E, 0x00])
 
 
 @cocotb.test()
 async def test_spi_controller_12mhz_bypass(dut):
     """4 cycles per bit (12.5 MHz at 50 MHz) needs the MISO synchronizer bypassed."""
-    await spi_run(dut, SPI_FAST, True, [0x9F, 0x00, 0xA5, 0x3C],
+    await spi_run(dut, "spi_mode0_fast", True, [0x9F, 0x00, 0xA5, 0x3C],
                   [0x5A, 0xC3, 0x01, 0x80])
 
 
@@ -168,7 +92,7 @@ async def test_i2c_controller_write(dut):
     chip = await new_chip(dut)
     sda, scl = 3, 4
     chip.pull_up((1 << sda) | (1 << scl))
-    prog = await chip.load(I2C_WRITE)
+    prog = await chip.load_program("i2c_write")
     await chip.setup_engine(0, prog, clkdiv=1, out_base=sda, set_base=sda, in_base=sda,
                             side_base=scl)
     # Release both lines in the pin registers before enabling open-drain drive.

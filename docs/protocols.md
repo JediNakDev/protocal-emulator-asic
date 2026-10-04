@@ -1,8 +1,12 @@
 # Protocol programs
 
-Each protocol is a program in `programs/` plus host-side software in `tools/pe/proto/`.
+Each protocol runs a program from `programs/`.
+Host-side framing and transaction helpers for JTAG, SWD, PS/2, CAN, USB and Ethernet live in `tools/pe/proto/`.
 Every one is verified in RTL simulation by a cocotb test (`test/test_<protocol>.py`) against an independent peer model that shares no code with the program or the host-side software.
-UART, SPI and I2C live in `test/test_protocols.py`, with their programs inline.
+UART, SPI and I2C are verified in `test/test_protocols.py`, which loads the same standalone program files used for upload.
+
+The base protocol sources are `uart_tx.pasm`, `uart_rx.pasm`, `spi_mode0.pasm`, `spi_mode0_fast.pasm` and `i2c_write.pasm` in `programs/`.
+Their comments describe the pin configuration, data packing and timing.
 
 All results below are from RTL simulation.
 They do not cover pad timing, metastability, clock duty cycle or analog front ends.
