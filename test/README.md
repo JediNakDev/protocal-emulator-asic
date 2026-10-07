@@ -1,7 +1,8 @@
-# Sample testbench for a Tiny Tapeout project
+# Testbench
 
-This is a sample testbench for a Tiny Tapeout project. It uses [cocotb](https://docs.cocotb.org/en/stable/) to drive the DUT and check the outputs.
-See below to get started or for more information, check the [website](https://tinytapeout.com/hdl/testing/).
+The tests use [cocotb](https://docs.cocotb.org/en/stable/) and drive only the top-level pins.
+`chip.py` is the Host model, `peers.py` holds independent protocol peers, and `tb.v` models pull-ups, open-drain peers and line contention.
+Run `make test LATCH=yes` to simulate the latch storage build.
 
 ## Setting up
 

@@ -3,7 +3,7 @@ project:
   title:        "Programmable Protocol Emulator"
   author:       "JediNakDev" # Replace with your preferred name before submission
   discord:      ""      # Your discord username, for communication and automatically assigning you a Tapeout role (optional)
-  description:  "Development scaffold for a programmable protocol emulator"
+  description:  "Two programmable pin engines with a bit state machine, checksum and capture units, loaded over a 1 or 4 bit host port"
   language:     "Verilog" # other examples include SystemVerilog, Amaranth, VHDL, etc
   clock_hz:     50000000 # Initial target, matching CLOCK_PERIOD=20ns in src/config.json
 
@@ -18,39 +18,48 @@ project:
   # Don't forget to also update `PROJECT_SOURCES` in test/Makefile.
   source_files:
     - "project.v"
+    - "pe_host.v"
+    - "pe_global.v"
+    - "pe_imem.v"
+    - "pe_store.v"
+    - "pe_pins.v"
+    - "pe_g2.v"
+    - "pe_engine.v"
+    - "pe_fifo.v"
+    - "pe_lfsr.v"
 
 # The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
 # This section is for the datasheet/website. Use descriptive names (e.g., RX, TX, MOSI, SCL, SEG_A, etc.).
 pinout:
   # Inputs
-  ui[0]: "A[0]"
-  ui[1]: "A[1]"
-  ui[2]: "A[2]"
-  ui[3]: "A[3]"
-  ui[4]: "A[4]"
-  ui[5]: "A[5]"
-  ui[6]: "A[6]"
-  ui[7]: "A[7]"
+  ui[0]: "HCS_N"
+  ui[1]: "HSCK"
+  ui[2]: "HDI0"
+  ui[3]: "HDI1"
+  ui[4]: "HDI2"
+  ui[5]: "HDI3"
+  ui[6]: "P8 (input)"
+  ui[7]: "P9 (input)"
 
   # Outputs
-  uo[0]: "SUM[0]"
-  uo[1]: "SUM[1]"
-  uo[2]: "SUM[2]"
-  uo[3]: "SUM[3]"
-  uo[4]: "SUM[4]"
-  uo[5]: "SUM[5]"
-  uo[6]: "SUM[6]"
-  uo[7]: "SUM[7]"
+  uo[0]: "HDO0"
+  uo[1]: "HDO1"
+  uo[2]: "HDO2"
+  uo[3]: "HDO3"
+  uo[4]: "HIRQ"
+  uo[5]: "P10 (output)"
+  uo[6]: "P11 (output)"
+  uo[7]: "P12 (output)"
 
   # Bidirectional pins
-  uio[0]: "B[0]"
-  uio[1]: "B[1]"
-  uio[2]: "B[2]"
-  uio[3]: "B[3]"
-  uio[4]: "B[4]"
-  uio[5]: "B[5]"
-  uio[6]: "B[6]"
-  uio[7]: "B[7]"
+  uio[0]: "P0"
+  uio[1]: "P1"
+  uio[2]: "P2"
+  uio[3]: "P3"
+  uio[4]: "P4"
+  uio[5]: "P5"
+  uio[6]: "P6"
+  uio[7]: "P7"
 
 # Do not change!
 yaml_version: 6

@@ -18,11 +18,13 @@ The announced submission deadline is January 18, 2027.
 - [x] Install a local simulator, linter, and isolated cocotb environment.
 - [x] Pass local RTL lint and the template smoke test.
 - [x] Configure GitHub workflows for CMOS5L GDS, precheck, gate-level simulation, and documentation.
-- [ ] Confirm the first remote GDS build passes.
-- [ ] Replace the example adder with the first useful circuit.
+- [x] Replace the example adder with the programmable emulator in `docs/spec.md`.
+- [x] Run UART TX/RX, SPI controller and I2C controller programs against independent peers in RTL simulation.
+- [x] Estimate area with yosys on the IHP liberty (`docs/area-log.md`).
+- [ ] Confirm the first remote GDS build passes and record routed area and timing.
 
-The current adder proves the development toolchain works.
-It does not yet demonstrate protocol emulation or validate the proposed 50 MHz clock for the eventual engine.
+The architecture grew beyond the single engine proposed below: two engines plus general primitives, chosen to cover unplanned protocols.
+The sections below remain as background; `docs/spec.md` is the current definition.
 
 ## Start here: transmit one UART byte
 
