@@ -61,6 +61,14 @@ module pe_engine #(
     output wire        st_host_tx_ovf,
     output wire        st_host_rx_unf,
     output reg         st_cap_ovr
+`ifdef FORMAL
+    ,
+    // Fetch state for formal/fetch.v
+    output wire [5:0]  f_pc,
+    output wire [15:0] f_ir,
+    output wire [15:0] f_cur,
+    output wire        f_exec_valid
+`endif
 );
 
   localparam [4:0] SIXTEEN = 5'd16;
@@ -874,5 +882,12 @@ module pe_engine #(
   end
 
   assign flag_set = i_flag_set | cap_flag_set;
+
+`ifdef FORMAL
+  assign f_pc = pc;
+  assign f_ir = ir;
+  assign f_cur = cur;
+  assign f_exec_valid = exec_valid;
+`endif
 
 endmodule
