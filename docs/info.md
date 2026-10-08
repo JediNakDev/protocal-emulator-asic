@@ -24,6 +24,7 @@ Run `make setup` once, then `make check` from the repository root.
 The cocotb tests drive only the top-level pins: they load programs through the Host port and check protocol behavior with independent peer models.
 They cover the Host port, instruction timing, the general building blocks, and protocol programs for UART, SPI, I2C, JTAG, SWD, PS/2, CAN, low-speed USB and 10BASE-T.
 [Protocol programs](protocols.md) lists what each program does, what was verified and the limits found.
+A reference model written from the specification runs random programs alongside the chip and must agree on every pin in every cycle, and `make formal` proves the fetch stage, buffer occupancy and reset outputs.
 
 On the demo board, the RP2040 acts as Host:
 
