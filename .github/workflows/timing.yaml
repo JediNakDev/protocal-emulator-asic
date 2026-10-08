@@ -1,22 +1,14 @@
 # Fast setup/hold estimate at every corner, about 15 minutes instead of the
 # 3+ hours of the full gds workflow. It runs the same Tiny Tapeout LibreLane
 # flow up to the timing repair after global routing, then static timing
-# analysis with parasitics estimated from the global routes, once per corner.
-# Expect a spread of a few nanoseconds between runs of equivalent logic; the
-# gds workflow remains the sign-off.
+# analysis once per corner, with parasitics estimated from global routes
+# (tools/timing/route_parasitics.tcl). Expect a spread of a few nanoseconds
+# between runs of equivalent logic; the gds workflow remains the sign-off.
 name: timing
 on: [push, workflow_dispatch]
 jobs:
   timing:
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        variant:
-          - '{"SYNTH_STRATEGY": "DELAY 4"}'
-          - '{"SYNTH_STRATEGY": "DELAY 4", "SYNTH_AUTONAME": false}'
-          - '{"SYNTH_STRATEGY": "DELAY 3"}'
-          - '{"SYNTH_STRATEGY": "DELAY 4", "PL_TIMING_DRIVEN": false, "RUN_POST_GRT_RESIZER_TIMING": false}'
     env:
       PDK: ihp-sg13cmos5l
       PDK_ROOT: /home/runner/pdk
@@ -50,13 +42,10 @@ jobs:
           pip install "librelane==$LL_VERSION"
 
       - name: Synthesize, place, build the clock tree, route globally and repair timing
-        env:
-          VARIANT: ${{ matrix.variant }}
         run: |
           ./tt/tt_tool.py --create-user-config --ihp
-          python -c "import json, os; c = json.load(open('src/config.json')); \
+          python -c "import json; c = json.load(open('src/config.json')); \
             c.update(json.load(open('src/user_config.json'))); \
-            c['SYNTH_AUTONAME'] = True; c.update(json.loads(os.environ['VARIANT'])); \
             json.dump(c, open('src/config_merged.json', 'w'), indent=2)"
           mkdir -p runs/wokwi
           $LL --run-tag wokwi --force-run-dir runs/wokwi --to OpenROAD.ResizerTimingPostGRT src/config_merged.json
@@ -68,7 +57,8 @@ jobs:
             mkdir -p "runs/sta-$corner"
             $LL --run-tag "sta-$corner" --force-run-dir "runs/sta-$corner" \
               --with-initial-state "$STATE" --only OpenROAD.STAMidPNR \
-              -c "DEFAULT_CORNER=$corner" src/config_merged.json
+              -c "DEFAULT_CORNER=$corner" -c "STA_EXTRA_CORNER_TCL_FILE=$PWD/tools/timing/route_parasitics.tcl" \
+              src/config_merged.json
           done
 
       - name: Summary
@@ -84,15 +74,16 @@ jobs:
               jq -r --arg c "$c" '"| \($c) | \(.["timing__setup__ws__corner:" + $c]) | \(.["timing__setup__tns__corner:" + $c]) | \(.["timing__hold__ws__corner:" + $c]) |"' "$m"
             done
             echo
-            last=$(ls runs/wokwi/*/or_metrics_out.json | sort -V | tail -1)
-            echo "Cell area: $(jq '.["design__instance__area__stdcell"] // .["design__instance__area"]' "$last") µm²"
+            area=$(for f in $(ls runs/wokwi/*/or_metrics_out.json | sort -V); do
+              jq -r '.["design__instance__area__stdcell"] // empty' "$f"; done | tail -1)
+            echo "Standard cell area: $area µm²"
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload reports
         if: success() || failure()
         uses: actions/upload-artifact@v7
         with:
-          name: timing-reports-${{ strategy.job-index }}
+          name: timing-reports
           path: |
             runs/sta-*/*/*.rpt
             runs/sta-*/*/or_metrics_out.json

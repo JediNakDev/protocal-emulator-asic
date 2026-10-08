@@ -19,12 +19,6 @@
   "//": "The value is in nanoseconds, so 20ns == 50MHz.",
   "CLOCK_PERIOD": 20,
 
-  "//": "Timing at every corner, not only the typical one (docs/area-log.md, 2026-10-08):",
-  "//": "delay-oriented synthesis, timing-driven placement and timing repair after global routing.",
-  "SYNTH_STRATEGY": "DELAY 4",
-  "PL_TIMING_DRIVEN": true,
-  "RUN_POST_GRT_RESIZER_TIMING": true,
-
   "//": "Hold slack margin - Increase them in case you are getting hold violations.",
   "PL_RESIZER_HOLD_SLACK_MARGIN": 0.1,
   "GRT_RESIZER_HOLD_SLACK_MARGIN": 0.05,

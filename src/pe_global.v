@@ -20,10 +20,10 @@ module pe_global (
     output reg  [7:0]  bus_rdata,
     // Engine control
     output reg  [1:0]  enable,
-    output reg  [1:0]  restart,
-    output reg  [1:0]  step,
-    output reg  [1:0]  fifo_clear,
-    output reg         div_sync,
+    output wire [1:0]  restart,
+    output wire [1:0]  step,
+    output wire [1:0]  fifo_clear,
+    output wire        div_sync,
     output reg  [2:0]  dbg_sel,
     output reg         quad,
     // Instruction memory write port
@@ -54,9 +54,11 @@ module pe_global (
   reg [7:0]  sticky_mask;
   reg [23:0] counter_snap;
 
-  // CMD pulses come from registers, one cycle after the write, so no Host
-  // bus decoding reaches the engines' issue logic in the same cycle.
   wire       cmd_wr = wr & (bus_addr[4:0] == 5'h03);
+  assign restart    = cmd_wr ? bus_wdata[1:0] : 2'b00;
+  assign step       = cmd_wr ? bus_wdata[3:2] : 2'b00;
+  assign fifo_clear = cmd_wr ? bus_wdata[5:4] : 2'b00;
+  assign div_sync   = cmd_wr & bus_wdata[6];
 
   assign imem_we    = wr & bus_hi & (bus_addr[4:0] == 5'h0B);
   assign imem_wdata = {bus_wdata, bus_lo_hold};
@@ -68,10 +70,6 @@ module pe_global (
   always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       enable       <= 2'b00;
-      restart      <= 2'b00;
-      step         <= 2'b00;
-      fifo_clear   <= 2'b00;
-      div_sync     <= 1'b0;
       dbg_sel      <= 3'd0;
       quad         <= 1'b0;
       imem_addr    <= 6'd0;
@@ -84,10 +82,6 @@ module pe_global (
       counter_snap <= 24'd0;
     end else begin
       counter <= counter + 32'd1;
-      restart    <= cmd_wr ? bus_wdata[1:0] : 2'b00;
-      step       <= cmd_wr ? bus_wdata[3:2] : 2'b00;
-      fifo_clear <= cmd_wr ? bus_wdata[5:4] : 2'b00;
-      div_sync   <= cmd_wr & bus_wdata[6];
       if (bus_fetch && bus_addr == 7'h16) counter_snap <= counter[31:8];
 
       // A set wins over a clear in the same cycle.
