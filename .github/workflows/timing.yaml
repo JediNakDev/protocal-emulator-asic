@@ -2,7 +2,9 @@
 # 3+ hours of the full gds workflow. It runs the same Tiny Tapeout LibreLane
 # flow up to the timing repair after global routing, then static timing
 # analysis with parasitics estimated from the global routes, once per corner.
-# Expect a spread of a few nanoseconds between runs of equivalent logic; the
+# The estimate is optimistic: on this design, paths have been about a third
+# longer after detailed routing (docs/area-log.md), and equivalent logic
+# spreads by a few nanoseconds between runs. Use it to compare changes; the
 # gds workflow remains the sign-off.
 name: timing
 on: [push, workflow_dispatch]
