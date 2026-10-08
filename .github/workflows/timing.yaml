@@ -49,13 +49,9 @@ jobs:
             "import sys, yaml; print(yaml.safe_load(sys.stdin)['inputs']['librelane-version']['default'])")
           pip install "librelane==$LL_VERSION"
 
-<<<<<<< HEAD
-      - name: Synthesize, place, build the clock tree and route globally
+      - name: Synthesize, place, build the clock tree, route globally and repair timing
         env:
           VARIANT: ${{ matrix.variant }}
-=======
-      - name: Synthesize, place, build the clock tree, route globally and repair timing
->>>>>>> feat/timing-closure
         run: |
           ./tt/tt_tool.py --create-user-config --ihp
           python -c "import json, os; c = json.load(open('src/config.json')); \
@@ -78,12 +74,7 @@ jobs:
       - name: Summary
         run: |
           {
-<<<<<<< HEAD
-            echo '### Variant ${{ matrix.variant }}'
-            echo "## Estimated timing after global routing (clock period $(jq .CLOCK_PERIOD src/config_merged.json) ns)"
-=======
             echo "## Estimated timing before detailed routing (clock period $(jq .CLOCK_PERIOD src/config_merged.json) ns)"
->>>>>>> feat/timing-closure
             echo
             echo "| Corner | Setup worst slack (ns) | Setup total negative slack (ns) | Hold worst slack (ns) |"
             echo "| --- | --- | --- | --- |"
@@ -107,4 +98,3 @@ jobs:
             runs/sta-*/*/or_metrics_out.json
             runs/wokwi/*/or_metrics_out.json
             runs/wokwi/*-yosys-synthesis/reports/*
-            runs/wokwi/*-yosys-synthesis/*.nl.v
