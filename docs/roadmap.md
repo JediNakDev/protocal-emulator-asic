@@ -25,6 +25,7 @@ The announced submission deadline is January 18, 2027.
 - [x] Add a reference model written from the specification and compare random programs against it (`test/test_random.py`).
 - [x] Prove the fetch stage, buffer occupancy and reset outputs formally (`formal/`).
 - [ ] Close setup timing at every corner at the documented clock.
+- [x] Demonstrate a distinctive capability: cycle-exact waveform capture, edit and replay for any protocol (`docs/protocols.md`).
 
 The architecture grew beyond the single engine proposed below: two engines plus general primitives, chosen to cover unplanned protocols.
 The sections below remain as background; `docs/spec.md` is the current definition.
@@ -179,4 +180,4 @@ Keep an area/timing log with the source commit, memory size, cell area, routed t
 Review the latest GDS result before increasing memory, adding another engine, or expanding the instruction set.
 
 The UART TX milestone above and phases 1 to 3 are complete, as is most of phase 4's verification.
-The next tasks are timing closure at every corner, confirmed by a routed build, and the distinctive feature.
+The next task is the open item under "Where we are now": timing closure at every corner, confirmed by a routed build.
