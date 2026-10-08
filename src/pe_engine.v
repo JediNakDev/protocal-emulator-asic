@@ -29,9 +29,12 @@ module pe_engine #(
     input  wire        fifo_clear,
     input  wire        div_sync,
     input  wire [2:0]  dbg_sel,
-    // Instruction memory
-    output wire [5:0]  pc_o,
+    // Instruction memory: one read port, and the Host write port for snooping
+    output wire [5:0]  fetch_addr,
     input  wire [15:0] imem_data,
+    input  wire        imem_we,
+    input  wire [5:0]  imem_waddr,
+    input  wire [15:0] imem_wdata,
     // Pins
     input  wire [15:0] pins_in,
     output reg  [12:0] pin_out,
@@ -209,6 +212,7 @@ module pe_engine #(
 
   // ======================================================== execution state
   reg [5:0]  pc;
+  reg [15:0] ir;  // the instruction memory word at PC, fetched one cycle ahead
   reg [15:0] x, y, isr, osr, exec_instr;
   reg [4:0]  isr_cnt, osr_cnt, delay_cnt;
   reg [15:0] div_cnt;
@@ -276,9 +280,7 @@ module pe_engine #(
   assign st_rx_ovf   = rx_drop;
   assign st_host_rx_unf = h_rx_unf | (rx_read_commit & rx_read_empty);
 
-  assign pc_o = pc;
-
-  wire [15:0] instr = exec_valid ? exec_instr : imem_data;
+  wire [15:0] instr = exec_valid ? exec_instr : ir;
   wire [2:0]  op = instr[15:13];
   wire [3:0]  fld = instr[7:4];  // `in` source / `out` destination
   wire [4:0]  nbits = (instr[3:0] == 4'd0) ? SIXTEEN : {1'b0, instr[3:0]};
@@ -420,6 +422,38 @@ module pe_engine #(
                                       : ((isr << nbits) | (in_data & mask_n));
   wire [4:0]  isr_cnt_in = sat16({1'b0, isr_cnt} + {1'b0, nbits});
 
+  // ------------------------------------------------------------- fetch
+  // `ir` always holds the instruction memory word at PC, as the memory reads
+  // at the start of the cycle. Whether an instruction would jump, and where,
+  // depends only on state, so the next word is read while the instruction
+  // executes; the late stall decision then only chooses between that word and
+  // `ir`. The Host write port is snooped, so a write takes effect at the end
+  // of the cycle that carries it, as if the engine read the memory directly.
+  reg jmp_cond;
+  always @(*) begin
+    case ({instr[13], instr[7:6]})
+      3'd0: jmp_cond = 1'b1;
+      3'd1: jmp_cond = (x == 16'd0);
+      3'd2: jmp_cond = (x != 16'd0);
+      3'd3: jmp_cond = (y == 16'd0);
+      3'd4: jmp_cond = (y != 16'd0);
+      3'd5: jmp_cond = (x != y);
+      3'd6: jmp_cond = jmp_pat ? pat_match : pins_in[jmp_pin];
+      default: jmp_cond = ~osr_empty;
+    endcase
+  end
+
+  wire       op_jmp = (op[2:1] == 2'b00);
+  wire       out_pc = (op == OP_OUT) & (fld == OUT_PC);
+  wire       mov_pc = (op == OP_MOV) & (instr[7:5] == 3'd5);
+  wire       jumps = (op_jmp & jmp_cond) | out_pc | mov_pc;
+  wire [5:0] jtarget = out_pc ? (jmp_base + out_data[5:0]) : mov_pc ? mov_val[5:0] : instr[5:0];
+  wire [5:0] pc_seq = (pc == wrap_top) ? wrap_bot : pc + 6'd1;
+
+  assign fetch_addr = jumps ? jtarget : pc_seq;
+  wire [15:0] fetch_word = (imem_we && imem_waddr == fetch_addr) ? imem_wdata : imem_data;
+  wire [15:0] hold_word = (imem_we && imem_waddr == pc) ? imem_wdata : ir;
+
   // An emission conflicts with instructions that modify the ISR or step the
   // checksum register; they stall for that cycle.
   wire touch_isr = (op == OP_IN) |
@@ -431,13 +465,13 @@ module pe_engine #(
 
   // ============================================================ next state
   reg [5:0]  n_pc;
+  reg [15:0] n_ir;
   reg [15:0] n_x, n_y, n_isr, n_osr, n_exec_instr;
   reg [4:0]  n_isr_cnt, n_osr_cnt, n_delay;
   reg [12:0] n_pin_out, n_pin_dir;
   reg        n_exec_valid, n_irqw;
   reg [31:0] n_lfsr;
-  reg        stall, jump, exec_new, cond, wcond;
-  reg [5:0]  jtarget;
+  reg        stall, exec_new, wcond;
   reg        emit_b;
   reg [7:0]  i_flag_set;
   reg [15:0] isr_e;
@@ -445,6 +479,7 @@ module pe_engine #(
 
   always @(*) begin
     n_pc         = pc;
+    n_ir         = hold_word;
     n_x          = x;
     n_y          = y;
     n_isr        = isr;
@@ -459,10 +494,7 @@ module pe_engine #(
     n_delay      = delay_cnt;
     n_lfsr       = lfsr_val;
     stall        = 1'b0;
-    jump         = 1'b0;
-    jtarget      = 6'd0;
     exec_new     = 1'b0;
-    cond         = 1'b0;
     wcond        = 1'b0;
     e_tx_pop     = 1'b0;
     e_rx_push    = 1'b0;
@@ -485,19 +517,12 @@ module pe_engine #(
         stall = 1'b1;
       end else begin
         case (op)
-          3'd0, 3'd1: begin  // jmp
+          3'd0, 3'd1: begin  // jmp; the condition and target are computed above
             case ({instr[13], instr[7:6]})
-              3'd0: cond = 1'b1;
-              3'd1: cond = (x == 16'd0);
-              3'd2: begin cond = (x != 16'd0); n_x = x - 16'd1; end
-              3'd3: cond = (y == 16'd0);
-              3'd4: begin cond = (y != 16'd0); n_y = y - 16'd1; end
-              3'd5: cond = (x != y);
-              3'd6: cond = jmp_pat ? pat_match : pins_in[jmp_pin];
-              default: cond = ~osr_empty;
+              3'd2: n_x = x - 16'd1;
+              3'd4: n_y = y - 16'd1;
+              default: ;
             endcase
-            jump    = cond;
-            jtarget = instr[5:0];
           end
 
           OP_WAIT: begin
@@ -543,10 +568,6 @@ module pe_engine #(
                 OUT_X: n_x = out_data;
                 OUT_Y: n_y = out_data;
                 OUT_PINDIRS: n_pin_dir = wr_range(pin_dir, out_base, out_cnt, out_data);
-                OUT_PC: begin
-                  jump    = 1'b1;
-                  jtarget = jmp_base + out_data[5:0];
-                end
                 OUT_ISR: begin
                   n_isr     = out_data;
                   n_isr_cnt = nbits;
@@ -634,10 +655,7 @@ module pe_engine #(
                 n_exec_instr = mov_val;
                 exec_new     = 1'b1;
               end
-              3'd5: begin
-                jump    = 1'b1;
-                jtarget = mov_val[5:0];
-              end
+              3'd5: ;  // pc: computed above
               3'd6: begin
                 n_isr     = mov_val;
                 n_isr_cnt = 5'd0;
@@ -670,8 +688,10 @@ module pe_engine #(
       end
 
       if (!stall) begin
-        if (jump) n_pc = jtarget;
-        else if (!exec_valid) n_pc = (pc == wrap_top) ? wrap_bot : pc + 6'd1;
+        if (jumps || !exec_valid) begin
+          n_pc = fetch_addr;
+          n_ir = fetch_word;
+        end
         n_exec_valid = exec_new;
         n_delay      = exec_new ? 5'd0 : dly;
       end
@@ -704,6 +724,7 @@ module pe_engine #(
   always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       pc         <= 6'd0;
+      ir         <= 16'd0;
       x          <= 16'd0;
       y          <= 16'd0;
       isr        <= 16'd0;
@@ -720,6 +741,7 @@ module pe_engine #(
       lfsr_val   <= 32'd0;
     end else begin
       pc      <= n_pc;
+      ir      <= n_ir;
       x       <= n_x;
       y       <= n_y;
       pin_out <= n_pin_out;

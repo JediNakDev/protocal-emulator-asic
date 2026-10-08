@@ -1,0 +1,84 @@
+# Fast setup/hold estimate at every corner, about 15 minutes instead of the
+# 3+ hours of the full gds workflow. It runs the same Tiny Tapeout LibreLane
+# flow up to global routing, then static timing analysis with estimated
+# parasitics, once per corner. The gds workflow remains the sign-off.
+name: timing
+on: [push, workflow_dispatch]
+jobs:
+  timing:
+    runs-on: ubuntu-24.04
+    env:
+      PDK: ihp-sg13cmos5l
+      PDK_ROOT: /home/runner/pdk
+      GDS_ACTION: https://raw.githubusercontent.com/TinyTapeout/tt-gds-action/ihp-cmos5l
+      # Options after --dockerized are passed to LibreLane inside the container.
+      LL: python -m librelane --pdk-root /home/runner/pdk --docker-no-tty --dockerized --pdk-root /home/runner/pdk --pdk ihp-sg13cmos5l --manual-pdk --hide-progress-bar
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: Checkout tt-support-tools
+        uses: actions/checkout@v6
+        with:
+          repository: TinyTapeout/tt-support-tools
+          ref: ihp-sg13cmos5l
+          path: tt
+
+      - name: Setup python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # Same PDK revision and LibreLane version as the gds workflow's action.
+      - name: Install tools and PDK
+        run: |
+          pip install -r tt/requirements.txt
+          curl -fsSL "$GDS_ACTION/install_sg13cmos5l.sh" | bash
+          LL_VERSION=$(curl -fsSL "$GDS_ACTION/action.yml" | python -c \
+            "import sys, yaml; print(yaml.safe_load(sys.stdin)['inputs']['librelane-version']['default'])")
+          pip install "librelane==$LL_VERSION"
+
+      - name: Synthesize, place, build the clock tree and route globally
+        run: |
+          ./tt/tt_tool.py --create-user-config --ihp
+          python -c "import json; c = json.load(open('src/config.json')); \
+            c.update(json.load(open('src/user_config.json'))); \
+            json.dump(c, open('src/config_merged.json', 'w'), indent=2)"
+          $LL --run-tag wokwi --force-run-dir runs/wokwi --to OpenROAD.GlobalRouting src/config_merged.json
+
+      - name: Static timing analysis per corner
+        run: |
+          STATE=$(ls -d runs/wokwi/*-openroad-globalrouting)/state_out.json
+          for corner in nom_slow_1p08V_125C nom_typ_1p20V_25C nom_fast_1p32V_m40C; do
+            $LL --run-tag "sta-$corner" --force-run-dir "runs/sta-$corner" \
+              --with-initial-state "$STATE" --only OpenROAD.STAMidPNR \
+              -c "DEFAULT_CORNER=$corner" src/config_merged.json
+          done
+
+      - name: Summary
+        run: |
+          {
+            echo "## Estimated timing after global routing (clock period $(jq .CLOCK_PERIOD src/config_merged.json) ns)"
+            echo
+            echo "| Corner | Setup worst slack (ns) | Setup total negative slack (ns) | Hold worst slack (ns) |"
+            echo "| --- | --- | --- | --- |"
+            for d in runs/sta-*; do
+              m=$(ls "$d"/*/or_metrics_out.json)
+              c=${d#runs/sta-}
+              jq -r --arg c "$c" '"| \($c) | \(.["timing__setup__ws__corner:" + $c]) | \(.["timing__setup__tns__corner:" + $c]) | \(.["timing__hold__ws__corner:" + $c]) |"' "$m"
+            done
+            echo
+            echo "Cell area: $(jq '.["design__instance__area__stdcell"] // .["design__instance__area"]' $(ls runs/wokwi/*-openroad-globalrouting/or_metrics_out.json)) um²"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload reports
+        if: success() || failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: timing-reports
+          path: |
+            runs/sta-*/*/*.rpt
+            runs/sta-*/*/or_metrics_out.json
+            runs/wokwi/*-openroad-globalrouting/or_metrics_out.json
+            runs/wokwi/*-yosys-synthesis/reports/*
