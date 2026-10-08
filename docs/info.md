@@ -16,6 +16,9 @@ General building blocks extend what the programs can do, without any protocol-sp
 - Per-pin glitch filters, synchronizer bypass and falling-edge sampling refine the input timing.
 - Pattern waits and indexed jumps help programs react quickly to multi-pin conditions and decode symbols.
 
+Together these make the chip a cycle-exact recorder and signal generator for protocols it has no program for.
+Waveform capture and replay programs record every edge on a pin with 20 ns resolution and play it back exactly, or edited by the Host for fault injection (see [protocol programs](protocols.md)).
+
 The Host reaches every register through an SPI-style port, 1 bit wide after reset and 4 bits wide after one register write.
 
 ## How to test
@@ -24,6 +27,7 @@ Run `make setup` once, then `make check` from the repository root.
 The cocotb tests drive only the top-level pins: they load programs through the Host port and check protocol behavior with independent peer models.
 They cover the Host port, instruction timing, the general building blocks, and protocol programs for UART, SPI, I2C, JTAG, SWD, PS/2, CAN, low-speed USB and 10BASE-T.
 [Protocol programs](protocols.md) lists what each program does, what was verified and the limits found.
+A reference model written from the specification runs random programs alongside the chip and must agree on every pin in every cycle, and `make formal` proves the fetch stage, buffer occupancy and reset outputs.
 
 On the demo board, the RP2040 acts as Host:
 

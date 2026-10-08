@@ -11,7 +11,7 @@ help:
 	@echo "make test  - run cocotb with Icarus Verilog and save test/tb.fst"
 	@echo "make lint  - lint RTL with Verilator"
 	@echo "make synth-check - check RTL drivers with Yosys before optimization"
-	@echo "make formal - prove the properties in formal/ with yosys-smtbmc and z3"
+	@echo "make formal - prove the properties in formal/ with yosys-smtbmc (FORMAL_SOLVER, default z3)"
 	@echo "make check - run lint, synthesis checks, formal proofs and simulation"
 	@echo "make model - build and run the C protocol-engine model tests"
 	@echo "make clean - remove simulation outputs"
@@ -34,13 +34,14 @@ synth-check:
 # Property module and steps: two-step runs from a free state prove an induction
 # step; the reset check runs from power-up.
 FORMAL_PROPS := fetch:2 fifo:2 reset:8
+FORMAL_SOLVER ?= z3
 
 formal:
 	@mkdir -p formal/build
 	@set -e; for p in $(FORMAL_PROPS); do \
 	  name=$${p%%:*}; steps=$${p##*:}; \
 	  yosys -q -p "read_verilog -formal formal/$$name.v $(RTL_SOURCES); prep -top $${name}_props; flatten; memory -nomap; async2sync; dffunmap; opt_clean; write_smt2 -wires formal/build/$$name.smt2" 2>&1 | grep -v "Replacing memory" || true; \
-	  yosys-smtbmc -s z3 -t $$steps formal/build/$$name.smt2 > formal/build/$$name.log || { cat formal/build/$$name.log; exit 1; }; \
+	  yosys-smtbmc -s $(FORMAL_SOLVER) -t $$steps formal/build/$$name.smt2 > formal/build/$$name.log || { cat formal/build/$$name.log; exit 1; }; \
 	  echo "formal: $$name passed"; \
 	done
 
