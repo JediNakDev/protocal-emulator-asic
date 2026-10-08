@@ -19,9 +19,6 @@
   "//": "The value is in nanoseconds, so 20ns == 50MHz.",
   "CLOCK_PERIOD": 20,
 
-  "//": "SYNTH_STRATEGY - Delay-oriented synthesis, so setup timing holds at every corner,",
-  "//": "not only the typical one that Tiny Tapeout signs off (docs/area-log.md, 2026-10-08).",
-  "SYNTH_STRATEGY": "DELAY 4",
 
   "//": "Hold slack margin - Increase them in case you are getting hold violations.",
   "PL_RESIZER_HOLD_SLACK_MARGIN": 0.1,
