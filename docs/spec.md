@@ -199,7 +199,7 @@ Offsets are relative to the block base.
 | 0x04 | `SHIFTCTRL` | RW | Bit 0 autopush, bit 1 autopull, bit 2 `in` shifts right, bit 3 `out` shifts right, bits 6:4 buffer mode; any write clears both queues |
 | 0x05 | `THRESH` | RW | Bits 3:0 push threshold, bits 7:4 pull threshold (0 means 16) |
 | 0x06 | `OUTPIN` | RW | Bits 3:0 base, bits 7:4 count (0 means 16) |
-| 0x07 | `SETPIN` | RW | Bits 3:0 base, bits 6:4 count (0-5) |
+| 0x07 | `SETPIN` | RW | Bits 3:0 base, bits 6:4 count (0-5; 6 and 7 act as 5) |
 | 0x08 | `INPIN` | RW | Bits 3:0 `in` base, bits 7:4 `jmp pin` index |
 | 0x09 | `SIDEPIN` | RW | Bits 3:0 base, bits 5:4 count (0-3), bit 6 optional, bit 7 side-set drives directions |
 | 0x0A | `EXECCFG` | RW | Bits 5:0 jump base (G8), bit 6 `jmp pin` tests the pin pattern instead (G4) |
@@ -371,7 +371,7 @@ If the queue is empty, the `out` stalls.
 
 - `pc`: PC becomes `jump base + data` (modulo 64), an indexed jump.
 - `isr`: the ISR becomes the data and its count becomes `n`.
-- `exec`: the data is placed in the exec slot and runs on the next tick; the `out`'s own delay is ignored.
+- `exec`: the data is placed in the exec slot and runs on the next tick; the `out`'s own delay is ignored, as is that of `mov exec`.
 - `lfsr`: the checksum register shifts left by `n` and takes the data in its low bits; this never steps the checksum.
 - `g2`: hands data bit 0 to the bit state machine feed; stalls while the feed is full; acts as `null` unless this engine owns the bit state machine.
 - `ram`: writes the data to buffer entry `Y[2:0]`; ignored if that entry is not in a RAM role.
@@ -420,6 +420,7 @@ Each engine owns 8 entries of 16 bits.
 | 5 | Disabled | Disabled | Entries 0-7 |
 
 A disabled queue counts as both empty and full, so `pull block` and `push block` on it stall forever.
+Each queue fills its entries in order from the lowest one and wraps around; clearing a queue restarts it at its lowest entry.
 RAM reads by the engine (`Y[2:0]`) or the Host (`RAM_ADDR`) may address any entry, which lets the Host inspect queue contents.
 RAM writes from either side only take effect on entries in the RAM role.
 If the engine and the Host write the same entry in the same cycle, the engine's write wins and the Host's is lost.
@@ -454,6 +455,7 @@ Parity is a 1-bit CRC: left mode with `P = 0x80000000`, result in bit 31.
 A global 32-bit counter increments every `clk` cycle from reset and wraps after 2^32 cycles (86 s at 50 MHz).
 Each engine's capture unit watches pin `CAPCFG[3:0]` in the pin space, after the input path.
 On the selected edge it latches the counter into `CAPTURE`, and, if `CAPCFG` bit 6 is set, sets flag `CAPFLAG`.
+Writing `CAPCFG` to watch another pin is not an edge: the unit compares that pin with its own level from then on.
 If that flag is still set when the next edge arrives, the capture overrun sticky bit is set and `CAPTURE` is overwritten.
 The captured time includes the pin's input latency, which is constant for a given configuration.
 
@@ -473,7 +475,7 @@ The index is `{state[3:0], in1, in0}`.
 | --- | --- |
 | 0 | Enable |
 | 1 | Owner engine |
-| 3:2 | Step mode: 0 every cycle, 1 on each owner tick, 2 when the feed is full, 3 never |
+| 3:2 | Step mode: 0 every cycle, 1 on each tick of the owner's clock divider (not Host steps or exec slot ticks), 2 when the feed is full, 3 never |
 | 4 | Emit into the owner's ISR |
 
 Input sources (`G2_IN0`, `G2_IN1`): 0-15 the pin space, 16 the feed bit, 17 feed full, others 0.
@@ -488,7 +490,8 @@ A write is accepted only when the feed is empty, so an engine can hand over at m
 **Emit:** when the emit bit is set and `G2_CTRL` bit 4 is set, out0 shifts into the owner's ISR one cycle after the step, without any instruction.
 It follows the same rules as a 1-bit `in`: direction, count, the checksum feed, and autopush.
 If autopush finds the receive queue full, the word is dropped, the ISR clears, and the receive overflow sticky bit is set; the bit state machine never stalls.
-In a cycle with an emission, an owner instruction that would modify the ISR or step the checksum register stalls for that cycle.
+In a cycle with an emission, an owner instruction that would modify the ISR stalls for that cycle: any `in`, `push`, `mov isr` or `out isr`.
+If checksum feed bit 1 is set, so that the emission steps the checksum register, a 1-bit `in`, a 1-bit `out` that steps it, and `out lfsr` stall as well.
 
 ## Coordination flags
 

@@ -4,6 +4,26 @@ The tests use [cocotb](https://docs.cocotb.org/en/stable/) and drive only the to
 `chip.py` is the Host model, `peers.py` holds independent protocol peers, and `tb.v` models pull-ups, open-drain peers and line contention.
 Run `make test LATCH=yes` to simulate the latch storage build.
 
+## Random comparison with the reference model
+
+`test_random.py` runs random programs and configurations on the chip and on the reference model in `../tools/pe/model.py`, which is written from `docs/spec.md` and shares no code with the RTL.
+It compares every pad on every cycle, then all state the Host can read.
+The random setup includes the bit state machine, every pin mode, random board inputs, and instruction memory writes while the engines run.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PE_RANDOM_SEEDS` | 60 (4 at gate level) | Number of seeds |
+| `PE_RANDOM_SEED` | 1 | First seed |
+
+A failure names its seed, for example `PE_RANDOM_SEED=43 PE_RANDOM_SEEDS=1`, and the waveform is in `tb.fst`.
+Rerun one seed with:
+
+```sh
+PE_RANDOM_SEED=43 PE_RANDOM_SEEDS=1 make COCOTB_TEST_MODULES=test_random
+```
+
+The CI `test` workflow also runs 200 new seeds on every push, starting at 1000 times the run number.
+
 ## Setting up
 
 1. Edit [Makefile](Makefile) and modify `PROJECT_SOURCES` to point to your Verilog files.

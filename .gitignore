@@ -17,3 +17,5 @@ __pycache__/
 model/pe_test
 model/pe_test.dSYM/
 output/
+test/soak.xml
+formal/build/

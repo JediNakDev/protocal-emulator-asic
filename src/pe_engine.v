@@ -61,6 +61,14 @@ module pe_engine #(
     output wire        st_host_tx_ovf,
     output wire        st_host_rx_unf,
     output reg         st_cap_ovr
+`ifdef FORMAL
+    ,
+    // Fetch state for formal/fetch.v
+    output wire [5:0]  f_pc,
+    output wire [15:0] f_ir,
+    output wire [15:0] f_cur,
+    output wire        f_exec_valid
+`endif
 );
 
   localparam [4:0] SIXTEEN = 5'd16;
@@ -801,6 +809,8 @@ module pe_engine #(
   reg  cap_prev;
   wire cap_in = pins_in[cap_pin];
   wire cap_ev = (cap_edge[0] & cap_in & ~cap_prev) | (cap_edge[1] & ~cap_in & cap_prev);
+  // Selecting another pin is not an edge: start from that pin's level.
+  wire capcfg_wr = wr & (off == 5'h0D);
 
   always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
@@ -808,7 +818,7 @@ module pe_engine #(
       capture    <= 32'd0;
       st_cap_ovr <= 1'b0;
     end else begin
-      cap_prev   <= cap_in;
+      cap_prev   <= capcfg_wr ? pins_in[bus_wdata[3:0]] : cap_in;
       st_cap_ovr <= cap_ev & cap_flag_en & flags[cap_flag];
       if (cap_ev) capture <= counter;
     end
@@ -873,5 +883,11 @@ module pe_engine #(
 
   assign flag_set = i_flag_set | cap_flag_set;
 
+`ifdef FORMAL
+  assign f_pc = pc;
+  assign f_ir = ir;
+  assign f_cur = cur;
+  assign f_exec_valid = exec_valid;
+`endif
 
 endmodule

@@ -242,6 +242,24 @@ async def test_capture_and_overrun(dut):
     assert (await chip.read8(regs.STICKY)) & regs.STK_CAP_OVR0
 
 
+@cocotb.test()
+async def test_capture_pin_change_is_not_an_edge(dut):
+    """G3: selecting a pin whose level differs from the previously watched
+    pin records no capture and sets no flag; only a later edge does."""
+    chip = await new_chip(dut)
+    chip.set_pin8(1)
+    await chip.cycles(10)
+    # The unit watched pin 0 (low) since reset; pin 8 is high.
+    await chip.ereg(0, regs.CAPCFG, [8 | (3 << 4) | (1 << 6), 2])  # pin 8, both edges, flag 2
+    await chip.cycles(10)
+    assert await chip.read32(regs.engine_reg(0, regs.CAPTURE)) == 0
+    assert not (await chip.read8(regs.FLAGS)) & 0x04
+    chip.set_pin8(0)
+    await chip.cycles(10)
+    assert await chip.read32(regs.engine_reg(0, regs.CAPTURE)) != 0
+    assert (await chip.read8(regs.FLAGS)) & 0x04
+
+
 async def edge_pair(chip, drive, t_ns=None):
     """Drive pin 8 and pin 9 high together; return (capture0, capture1)."""
     if t_ns is not None:
