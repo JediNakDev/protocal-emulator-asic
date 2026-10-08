@@ -73,8 +73,9 @@ jobs:
               jq -r --arg c "$c" '"| \($c) | \(.["timing__setup__ws__corner:" + $c]) | \(.["timing__setup__tns__corner:" + $c]) | \(.["timing__hold__ws__corner:" + $c]) |"' "$m"
             done
             echo
-            last=$(ls runs/wokwi/*/or_metrics_out.json | sort -V | tail -1)
-            echo "Cell area: $(jq '.["design__instance__area__stdcell"] // .["design__instance__area"]' "$last") µm²"
+            area=$(for f in $(ls runs/wokwi/*/or_metrics_out.json | sort -V); do
+              jq -r '.["design__instance__area__stdcell"] // empty' "$f"; done | tail -1)
+            echo "Standard cell area: $area µm²"
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload reports
