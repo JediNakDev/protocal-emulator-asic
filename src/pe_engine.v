@@ -212,8 +212,9 @@ module pe_engine #(
 
   // ======================================================== execution state
   reg [5:0]  pc;
-  reg [15:0] ir;  // the instruction memory word at PC, fetched one cycle ahead
-  reg [15:0] x, y, isr, osr, exec_instr;
+  reg [15:0] ir;   // the instruction memory word at PC, fetched one cycle ahead
+  reg [15:0] cur;  // the instruction the next issue runs: the exec slot if full, else `ir`
+  reg [15:0] x, y, isr, osr;
   reg [4:0]  isr_cnt, osr_cnt, delay_cnt;
   reg [15:0] div_cnt;
   reg        exec_valid, irqw;
@@ -280,7 +281,9 @@ module pe_engine #(
   assign st_rx_ovf   = rx_drop;
   assign st_host_rx_unf = h_rx_unf | (rx_read_commit & rx_read_empty);
 
-  wire [15:0] instr = exec_valid ? exec_instr : ir;
+  // Decoding starts from a register: the exec slot selection happened when
+  // `cur` was loaded.
+  wire [15:0] instr = cur;
   wire [2:0]  op = instr[15:13];
   wire [3:0]  fld = instr[7:4];  // `in` source / `out` destination
   wire [4:0]  nbits = (instr[3:0] == 4'd0) ? SIXTEEN : {1'b0, instr[3:0]};
@@ -315,14 +318,14 @@ module pe_engine #(
   // ------------------------------------------------------------- helpers
   // Write `cnt` bits of `data` to pins base, base+1, ... (modulo 16).
   function [12:0] wr_range;
-    input [12:0] cur;
+    input [12:0] old;
     input [3:0]  base;
     input [4:0]  cnt;
     input [15:0] data;
     integer k;
     reg [3:0] o;
     begin
-      wr_range = cur;
+      wr_range = old;
       for (k = 0; k < 13; k = k + 1) begin
         o = k[3:0] - base;
         if ({1'b0, o} < cnt) wr_range[k] = data[o];
@@ -424,7 +427,7 @@ module pe_engine #(
 
   // ------------------------------------------------------------- fetch
   // `ir` always holds the instruction memory word at PC, as the memory reads
-  // at the start of the cycle. Whether an instruction would jump, and where,
+  // at the start of the cycle, and `cur` holds the exec slot or `ir`. Whether an instruction would jump, and where,
   // depends only on state, so the next word is read while the instruction
   // executes; the late stall decision then only chooses between that word and
   // `ir`. The Host write port is snooped, so a write takes effect at the end
@@ -465,7 +468,7 @@ module pe_engine #(
 
   // ============================================================ next state
   reg [5:0]  n_pc;
-  reg [15:0] n_ir;
+  reg [15:0] n_ir, n_cur;
   reg [15:0] n_x, n_y, n_isr, n_osr, n_exec_instr;
   reg [4:0]  n_isr_cnt, n_osr_cnt, n_delay;
   reg [12:0] n_pin_out, n_pin_dir;
@@ -489,7 +492,7 @@ module pe_engine #(
     n_pin_out    = pin_out;
     n_pin_dir    = pin_dir;
     n_exec_valid = exec_valid;
-    n_exec_instr = exec_instr;
+    n_exec_instr = cur;
     n_irqw       = irqw;
     n_delay      = delay_cnt;
     n_lfsr       = lfsr_val;
@@ -718,6 +721,8 @@ module pe_engine #(
     end
   end
 
+  always @(*) n_cur = n_exec_valid ? n_exec_instr : n_ir;
+
   // ============================================================ registers
   wire lfsr_host_wr = wr & (off[4:2] == 3'b110);  // 0x18-0x1B
 
@@ -725,6 +730,7 @@ module pe_engine #(
     if (!rst_n) begin
       pc         <= 6'd0;
       ir         <= 16'd0;
+      cur        <= 16'd0;
       x          <= 16'd0;
       y          <= 16'd0;
       isr        <= 16'd0;
@@ -733,7 +739,6 @@ module pe_engine #(
       osr_cnt    <= SIXTEEN;
       delay_cnt  <= 5'd0;
       exec_valid <= 1'b0;
-      exec_instr <= 16'd0;
       irqw       <= 1'b0;
       stalled    <= 1'b0;
       pin_out    <= 13'd0;
@@ -753,6 +758,7 @@ module pe_engine #(
         osr_cnt    <= SIXTEEN;
         delay_cnt  <= 5'd0;
         exec_valid <= 1'b0;
+        cur        <= n_ir;
         irqw       <= 1'b0;
         stalled    <= 1'b0;
       end else begin
@@ -762,13 +768,13 @@ module pe_engine #(
         osr_cnt    <= n_osr_cnt;
         delay_cnt  <= n_delay;
         exec_valid <= n_exec_valid;
-        exec_instr <= n_exec_instr;
+        cur        <= n_cur;
         irqw       <= n_irqw;
         if (issue) stalled <= stall;
       end
       // A forced instruction from the Host wins over the engine.
       if (forced_wr) begin
-        exec_instr <= {bus_wdata, bus_lo_hold};
+        cur        <= {bus_wdata, bus_lo_hold};
         exec_valid <= 1'b1;
       end
       // A Host write wins over an engine update in the same cycle.
