@@ -21,7 +21,8 @@ The announced submission deadline is January 18, 2027.
 - [x] Replace the example adder with the programmable emulator in `docs/spec.md`.
 - [x] Run UART TX/RX, SPI controller and I2C controller programs against independent peers in RTL simulation.
 - [x] Estimate area with yosys on the IHP liberty (`docs/area-log.md`).
-- [ ] Confirm the first remote GDS build passes and record routed area and timing.
+- [x] Confirm the first remote GDS build passes and record routed area and timing (`docs/area-log.md`).
+- [ ] Close setup timing at every corner at the documented clock.
 
 The architecture grew beyond the single engine proposed below: two engines plus general primitives, chosen to cover unplanned protocols.
 The sections below remain as background; `docs/spec.md` is the current definition.
@@ -175,5 +176,5 @@ Add each new RTL file to `info.yaml`, `test/Makefile`, and the root lint command
 Keep an area/timing log with the source commit, memory size, cell area, routed timing, and major warnings.
 Review the latest GDS result before increasing memory, adding another engine, or expanding the instruction set.
 
-Your next concrete task is the UART TX milestone above.
-Once it passes simulation and a physical build, use what it teaches about timing and pins to specify the programmable engine.
+The UART TX milestone above and phases 1 to 3 are complete.
+The next tasks are timing closure at every corner, confirmed by a routed build, and phase 4.

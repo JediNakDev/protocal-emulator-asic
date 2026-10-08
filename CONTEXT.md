@@ -14,9 +14,9 @@ Low-speed USB and 10 Mbit Ethernet are optional stretch goals.
 - Process and flow: IHP 130nm CMOS5L through Tiny Tapeout.
 - Allocation: 6x4 tiles under the currently published rules.
 - Submission deadline: January 18, 2027; recheck the announcement before submission.
-- Clock: initial 50 MHz target, pending routed timing validation.
+- Clock: 50 MHz target. Routed builds meet it at the typical corner, which Tiny Tapeout signs off; closing the slow corner is in progress (`docs/area-log.md`).
 - Repository: CMOS5L Verilog template with cocotb tests and Verilator lint.
-- Current RTL: the emulator in `docs/spec.md`, verified in RTL simulation; not yet through a CMOS5L GDS build.
+- Current RTL: the emulator in `docs/spec.md`, verified in RTL simulation and through routed CMOS5L GDS builds, precheck and gate-level simulation.
 
 `docs/roadmap.md` contains the proposed architecture and milestones, beginning with UART transmission.
 These are working plans, separate from the competition rules.
