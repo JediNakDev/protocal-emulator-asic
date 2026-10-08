@@ -50,11 +50,13 @@ jobs:
           pip install "librelane==$LL_VERSION"
 
       - name: Synthesize, place, build the clock tree and route globally
+        env:
+          VARIANT: ${{ matrix.variant }}
         run: |
           ./tt/tt_tool.py --create-user-config --ihp
-          python -c "import json; c = json.load(open('src/config.json')); \
+          python -c "import json, os; c = json.load(open('src/config.json')); \
             c.update(json.load(open('src/user_config.json'))); \
-            c.update(json.loads('${{ matrix.variant }}')); \
+            c.update(json.loads(os.environ['VARIANT'])); c['SYNTH_AUTONAME'] = True; \
             json.dump(c, open('src/config_merged.json', 'w'), indent=2)"
           mkdir -p runs/wokwi
           $LL --run-tag wokwi --force-run-dir runs/wokwi --to OpenROAD.GlobalRouting src/config_merged.json
@@ -96,3 +98,4 @@ jobs:
             runs/sta-*/*/or_metrics_out.json
             runs/wokwi/*-openroad-globalrouting/or_metrics_out.json
             runs/wokwi/*-yosys-synthesis/reports/*
+            runs/wokwi/*-yosys-synthesis/*.nl.v

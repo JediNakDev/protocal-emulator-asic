@@ -32,6 +32,7 @@ RUN = 400        # cycles the engines run
 TAIL = 80        # cycles after disabling, with the board inputs held
 G2_ON, EN_ON = 10, 60  # sampler cycles at which those Host writes start
 EN_OFF = EN_ON + RUN
+IMEM_AT = [EN_ON + 100, EN_ON + 200, EN_ON + 300]  # instruction memory writes while running
 G2_OFF = EN_OFF + 50
 CYCLES = G2_OFF + 50 + TAIL
 
@@ -73,6 +74,10 @@ def random_setup(rng):
         s["pincfg"].append(owner | (drive << 2) | (rng.getrandbits(2) << 4) | (flt << 6))
     toggling = [i for i in range(8) if (s["pincfg"][i] >> 2) & 3 in (0, 2)] + [8, 9]
     s["imem"] = [random_instr(rng, toggling) for _ in range(64)]
+    # Instruction memory writes while the engines run: (engine whose PC picks
+    # the address, offset from that PC or None for a random address, word).
+    s["imem_writes"] = [(rng.getrandbits(1), rng.choice([0, 0, 1, 1, 2, None]), random_instr(rng, toggling))
+                        for _ in IMEM_AT if rng.random() < 0.5]
     s["pull_up"] = rng.getrandbits(8)
     s["flags"] = rng.getrandbits(8) if rng.random() < 0.3 else 0
     s["engines"] = []
@@ -114,6 +119,7 @@ def calibration_setup():
     s["g2_ctrl"] = 0
     s["pincfg"] = [0] * 10 + [0x0C, 0, 0]  # pin 10: engine 0, always drive
     s["flags"] = 0
+    s["imem_writes"] = []
     for e in s["engines"]:
         e["start"] = 0
         e["regs"] = [0, 0, 0, 63, 0, 0, 0x10, 0x1A, 0, 0, 0, 0, 0, 0, 0]
@@ -194,6 +200,8 @@ async def run(chip, s, stim):
         EN_OFF: (regs.CTRL, 0),
         G2_OFF: (regs.G2_CTRL, 0),
     }
+    for at, (addr, word) in zip(IMEM_AT, s.get("imem_at", [])):
+        schedule[at] = (regs.IMEM_ADDR, [addr, word & 0xFF, word >> 8])
     trace = []
     for c in range(CYCLES):
         await RisingEdge(dut.clk)
@@ -267,14 +275,19 @@ def model_for(s, counter, latency):
     return m
 
 
-def model_run(m, s, stim, latency):
-    """Run the model through the sampled cycles. Returns the per-cycle pads."""
+def model_run(m, s, stim, latency, watch=()):
+    """Run the model through the sampled cycles. Returns the per-cycle pads,
+    and the engine PCs at the cycles in `watch`."""
     writes = {
         G2_ON + latency: lambda: set_g2_ctrl(m, s["g2_ctrl"]),
         EN_ON + latency: lambda: setattr(m, "enable", 3),
         EN_OFF + latency: lambda: setattr(m, "enable", 0),
         G2_OFF + latency: lambda: set_g2_ctrl(m, 0),
     }
+    for at, (addr, word) in zip(IMEM_AT, s.get("imem_at", [])):
+        # Two more bytes than the other writes: the address, then the word.
+        writes[at + latency + 32] = lambda addr=addr, word=word: m.imem.__setitem__(addr, word)
+    pcs = {}
     trace = []
     for c in range(CYCLES):
         if c in writes:
@@ -282,8 +295,23 @@ def model_run(m, s, stim, latency):
         oe, out, ui = stim[c]
         if c == 0:
             settle(m, oe, out, s["pull_up"], ui)
+        if c in watch:
+            pcs[c] = [e.pc for e in m.engines]
         trace.append(m.cycle(oe, out, s["pull_up"], ui))
-    return trace
+    return (trace, pcs) if watch else trace
+
+
+def place_imem_writes(s, stim, counter, latency):
+    """Choose the addresses of the running writes: mostly at or just after an
+    engine's PC at that moment, from a model run without the writes."""
+    s["imem_at"] = []
+    if not s["imem_writes"]:
+        return
+    effect = [at + latency + 32 for at in IMEM_AT]
+    _, pcs = model_run(model_for(s, counter, latency), s, stim, latency, watch=effect)
+    for (eng, off, word), c in zip(s["imem_writes"], effect):
+        addr = pcs[c][eng] + off if off is not None else (word * 7) % 64
+        s["imem_at"].append((addr & 63, word))
 
 
 def set_g2_ctrl(m, v):
@@ -334,11 +362,13 @@ def fmt_pads(p):
 
 
 # ------------------------------------------------------------------- test
-async def one_run(chip, s, stim_seed):
+async def one_run(chip, s, stim_seed, counter=None, latency=None):
     """Reset the chip with the first cycle's board inputs, then configure and
     run it."""
     dut = chip.dut
     stim = stimulus(random.Random(stim_seed), s)
+    if latency is not None:
+        place_imem_writes(s, stim, counter, latency)
     dut.rst_n.value = 0
     chip.quad = False
     chip.ui = 0x01 | (stim[0][2] << 6)
@@ -372,7 +402,7 @@ async def test_random_programs_match_model(dut):
     for seed in [None] + list(seeds):
         if seed is not None:
             s = random_setup(random.Random(seed))
-            stim, trace, state = await one_run(chip, s, seed)
+            stim, trace, state = await one_run(chip, s, seed, counter, latency)
         m = model_for(s, counter, latency)
         expect = model_run(m, s, stim, latency)
         name = "calibration" if seed is None else f"seed {seed} (PE_RANDOM_SEED={seed} PE_RANDOM_SEEDS=1)"
