@@ -498,9 +498,18 @@ Within one cycle, all sets and clears combine, and a set wins over a clear.
 ## Instruction memory
 
 64 entries of 16 bits, written only by the Host.
-Each engine reads the entry at its PC in the same cycle.
-A write takes effect at the end of the cycle that carries it.
-Writing the entry an enabled engine is about to execute gives undefined results for that instruction; stop or steer the engine away first.
+An instruction issues with the memory contents at the start of its cycle.
+A write takes effect at the end of the cycle that carries it, so every instruction issued after that cycle sees it, also on a running engine.
+
+Each engine reads the memory one cycle ahead, which keeps the memory's read multiplexer out of the path from decode to the engine's registers:
+
+- `ir` holds the word at PC, and `cur` holds the instruction the next issue runs: the exec slot if it is full, otherwise `ir`.
+- Whether an instruction would jump, and where, depends only on registers and pins, not on whether it stalls.
+  So while it executes, the engine reads the word at the jump target or at the next sequential address.
+  Whether the instruction completes, which is known later in the cycle, only chooses between that word and the held one.
+- The Host write port is compared with both addresses, so a write in the same cycle is never missed.
+
+This is invisible at the pins: every cycle count in this document is the same as for an engine that reads the memory in the cycle it issues.
 
 ### Storage implementation (H2)
 
