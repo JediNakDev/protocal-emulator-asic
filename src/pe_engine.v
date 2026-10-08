@@ -795,6 +795,8 @@ module pe_engine #(
   reg  cap_prev;
   wire cap_in = pins_in[cap_pin];
   wire cap_ev = (cap_edge[0] & cap_in & ~cap_prev) | (cap_edge[1] & ~cap_in & cap_prev);
+  // Selecting another pin is not an edge: start from that pin's level.
+  wire capcfg_wr = wr & (off == 5'h0D);
 
   always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
@@ -802,7 +804,7 @@ module pe_engine #(
       capture    <= 32'd0;
       st_cap_ovr <= 1'b0;
     end else begin
-      cap_prev   <= cap_in;
+      cap_prev   <= capcfg_wr ? pins_in[bus_wdata[3:0]] : cap_in;
       st_cap_ovr <= cap_ev & cap_flag_en & flags[cap_flag];
       if (cap_ev) capture <= counter;
     end
