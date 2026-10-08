@@ -16,6 +16,9 @@ General building blocks extend what the programs can do, without any protocol-sp
 - Per-pin glitch filters, synchronizer bypass and falling-edge sampling refine the input timing.
 - Pattern waits and indexed jumps help programs react quickly to multi-pin conditions and decode symbols.
 
+Together these make the chip a cycle-exact recorder and signal generator for protocols it has no program for.
+Waveform capture and replay programs record every edge on a pin with 20 ns resolution and play it back exactly, or edited by the Host for fault injection (see [protocol programs](protocols.md)).
+
 The Host reaches every register through an SPI-style port, 1 bit wide after reset and 4 bits wide after one register write.
 
 ## How to test
