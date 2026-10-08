@@ -45,12 +45,14 @@ jobs:
           python -c "import json; c = json.load(open('src/config.json')); \
             c.update(json.load(open('src/user_config.json'))); \
             json.dump(c, open('src/config_merged.json', 'w'), indent=2)"
+          mkdir -p runs/wokwi
           $LL --run-tag wokwi --force-run-dir runs/wokwi --to OpenROAD.GlobalRouting src/config_merged.json
 
       - name: Static timing analysis per corner
         run: |
           STATE=$(ls -d runs/wokwi/*-openroad-globalrouting)/state_out.json
           for corner in nom_slow_1p08V_125C nom_typ_1p20V_25C nom_fast_1p32V_m40C; do
+            mkdir -p "runs/sta-$corner"
             $LL --run-tag "sta-$corner" --force-run-dir "runs/sta-$corner" \
               --with-initial-state "$STATE" --only OpenROAD.STAMidPNR \
               -c "DEFAULT_CORNER=$corner" src/config_merged.json
