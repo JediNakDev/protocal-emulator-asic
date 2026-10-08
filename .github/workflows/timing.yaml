@@ -1,7 +1,9 @@
 # Fast setup/hold estimate at every corner, about 15 minutes instead of the
 # 3+ hours of the full gds workflow. It runs the same Tiny Tapeout LibreLane
-# flow up to global routing, then static timing analysis with estimated
-# parasitics, once per corner. The gds workflow remains the sign-off.
+# flow up to the timing repair after global routing, then static timing
+# analysis with parasitics estimated from the global routes, once per corner.
+# Expect a spread of a few nanoseconds between runs of equivalent logic; the
+# gds workflow remains the sign-off.
 name: timing
 on: [push, workflow_dispatch]
 jobs:
@@ -11,12 +13,10 @@ jobs:
       fail-fast: false
       matrix:
         variant:
-          - '{}'
-          - '{"SYNTH_STRATEGY": "DELAY 0"}'
-          - '{"SYNTH_STRATEGY": "DELAY 2"}'
           - '{"SYNTH_STRATEGY": "DELAY 4"}'
-          - '{"PL_TIMING_DRIVEN": true, "RUN_POST_GRT_RESIZER_TIMING": true}'
-          - '{"SYNTH_STRATEGY": "DELAY 2", "PL_TIMING_DRIVEN": true, "RUN_POST_GRT_RESIZER_TIMING": true}'
+          - '{"SYNTH_STRATEGY": "DELAY 4", "SYNTH_AUTONAME": false}'
+          - '{"SYNTH_STRATEGY": "DELAY 3"}'
+          - '{"SYNTH_STRATEGY": "DELAY 4", "PL_TIMING_DRIVEN": false, "RUN_POST_GRT_RESIZER_TIMING": false}'
     env:
       PDK: ihp-sg13cmos5l
       PDK_ROOT: /home/runner/pdk
@@ -49,21 +49,25 @@ jobs:
             "import sys, yaml; print(yaml.safe_load(sys.stdin)['inputs']['librelane-version']['default'])")
           pip install "librelane==$LL_VERSION"
 
+<<<<<<< HEAD
       - name: Synthesize, place, build the clock tree and route globally
         env:
           VARIANT: ${{ matrix.variant }}
+=======
+      - name: Synthesize, place, build the clock tree, route globally and repair timing
+>>>>>>> feat/timing-closure
         run: |
           ./tt/tt_tool.py --create-user-config --ihp
           python -c "import json, os; c = json.load(open('src/config.json')); \
             c.update(json.load(open('src/user_config.json'))); \
-            c.update(json.loads(os.environ['VARIANT'])); c['SYNTH_AUTONAME'] = True; \
+            c['SYNTH_AUTONAME'] = True; c.update(json.loads(os.environ['VARIANT'])); \
             json.dump(c, open('src/config_merged.json', 'w'), indent=2)"
           mkdir -p runs/wokwi
-          $LL --run-tag wokwi --force-run-dir runs/wokwi --to OpenROAD.GlobalRouting src/config_merged.json
+          $LL --run-tag wokwi --force-run-dir runs/wokwi --to OpenROAD.ResizerTimingPostGRT src/config_merged.json
 
       - name: Static timing analysis per corner
         run: |
-          STATE=$(ls -d runs/wokwi/*-openroad-globalrouting)/state_out.json
+          STATE=$(ls runs/wokwi/*/state_out.json | sort -V | tail -1)
           for corner in nom_slow_1p08V_125C nom_typ_1p20V_25C nom_fast_1p32V_m40C; do
             mkdir -p "runs/sta-$corner"
             $LL --run-tag "sta-$corner" --force-run-dir "runs/sta-$corner" \
@@ -74,8 +78,12 @@ jobs:
       - name: Summary
         run: |
           {
+<<<<<<< HEAD
             echo '### Variant ${{ matrix.variant }}'
             echo "## Estimated timing after global routing (clock period $(jq .CLOCK_PERIOD src/config_merged.json) ns)"
+=======
+            echo "## Estimated timing before detailed routing (clock period $(jq .CLOCK_PERIOD src/config_merged.json) ns)"
+>>>>>>> feat/timing-closure
             echo
             echo "| Corner | Setup worst slack (ns) | Setup total negative slack (ns) | Hold worst slack (ns) |"
             echo "| --- | --- | --- | --- |"
@@ -85,7 +93,8 @@ jobs:
               jq -r --arg c "$c" '"| \($c) | \(.["timing__setup__ws__corner:" + $c]) | \(.["timing__setup__tns__corner:" + $c]) | \(.["timing__hold__ws__corner:" + $c]) |"' "$m"
             done
             echo
-            echo "Cell area: $(jq '.["design__instance__area__stdcell"] // .["design__instance__area"]' $(ls runs/wokwi/*-openroad-globalrouting/or_metrics_out.json)) um²"
+            last=$(ls runs/wokwi/*/or_metrics_out.json | sort -V | tail -1)
+            echo "Cell area: $(jq '.["design__instance__area__stdcell"] // .["design__instance__area"]' "$last") µm²"
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload reports
@@ -96,6 +105,6 @@ jobs:
           path: |
             runs/sta-*/*/*.rpt
             runs/sta-*/*/or_metrics_out.json
-            runs/wokwi/*-openroad-globalrouting/or_metrics_out.json
+            runs/wokwi/*/or_metrics_out.json
             runs/wokwi/*-yosys-synthesis/reports/*
             runs/wokwi/*-yosys-synthesis/*.nl.v
