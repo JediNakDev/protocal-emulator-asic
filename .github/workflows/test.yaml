@@ -30,10 +30,19 @@ jobs:
           # make will return success even if the test fails, so check for failure in the results.xml
           ! grep failure test/results.xml
 
+      # Explore new seeds on every run; a failure names the seed to rerun.
+      - name: Random model comparison soak
+        run: |
+          make -C test COCOTB_TEST_MODULES=test_random COCOTB_RESULTS_FILE=soak.xml \
+            PE_RANDOM_SEEDS=200 PE_RANDOM_SEED=$((GITHUB_RUN_NUMBER * 1000))
+          ! grep failure test/soak.xml
+
       - name: Test Summary
         uses: test-summary/action@v2.4
         with:
-          paths: "test/results.xml"
+          paths: |
+            test/results.xml
+            test/soak.xml
         if: always()
 
       - name: upload waveform and test results
@@ -44,4 +53,5 @@ jobs:
           path: |
             test/tb.fst
             test/results.xml
+            test/soak.xml
             test/output/*
