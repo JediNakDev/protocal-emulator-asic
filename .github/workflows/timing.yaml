@@ -7,6 +7,16 @@ on: [push, workflow_dispatch]
 jobs:
   timing:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - '{}'
+          - '{"SYNTH_STRATEGY": "DELAY 0"}'
+          - '{"SYNTH_STRATEGY": "DELAY 2"}'
+          - '{"SYNTH_STRATEGY": "DELAY 4"}'
+          - '{"PL_TIMING_DRIVEN": true, "RUN_POST_GRT_RESIZER_TIMING": true}'
+          - '{"SYNTH_STRATEGY": "DELAY 2", "PL_TIMING_DRIVEN": true, "RUN_POST_GRT_RESIZER_TIMING": true}'
     env:
       PDK: ihp-sg13cmos5l
       PDK_ROOT: /home/runner/pdk
@@ -44,6 +54,7 @@ jobs:
           ./tt/tt_tool.py --create-user-config --ihp
           python -c "import json; c = json.load(open('src/config.json')); \
             c.update(json.load(open('src/user_config.json'))); \
+            c.update(json.loads('${{ matrix.variant }}')); \
             json.dump(c, open('src/config_merged.json', 'w'), indent=2)"
           mkdir -p runs/wokwi
           $LL --run-tag wokwi --force-run-dir runs/wokwi --to OpenROAD.GlobalRouting src/config_merged.json
@@ -61,6 +72,7 @@ jobs:
       - name: Summary
         run: |
           {
+            echo '### Variant ${{ matrix.variant }}'
             echo "## Estimated timing after global routing (clock period $(jq .CLOCK_PERIOD src/config_merged.json) ns)"
             echo
             echo "| Corner | Setup worst slack (ns) | Setup total negative slack (ns) | Hold worst slack (ns) |"
@@ -78,7 +90,7 @@ jobs:
         if: success() || failure()
         uses: actions/upload-artifact@v7
         with:
-          name: timing-reports
+          name: timing-reports-${{ strategy.job-index }}
           path: |
             runs/sta-*/*/*.rpt
             runs/sta-*/*/or_metrics_out.json
