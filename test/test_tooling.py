@@ -2,7 +2,6 @@
 """Regression tests for the local verification commands."""
 
 from pathlib import Path
-import shutil
 import subprocess
 
 import pytest
@@ -15,18 +14,25 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_formal_stops_on_synthesis_failure(tmp_path, stale_model):
     formal = tmp_path / "formal"
     formal.mkdir()
-    shutil.copy(ROOT / "formal/reset.v", formal)
-    command = ["make", "-f", str(ROOT / "Makefile"), "formal", "FORMAL_PROPS=reset:8"]
+    # Exercise the real build commands without solving the whole chip. Older
+    # Ubuntu Yosys/Z3 packages take minutes on the chip-wide reset proof.
+    (formal / "build_check.v").write_text("""
+module build_check_props(input wire clk);
+    reg q = 1'b0;
+    always @(posedge clk) q <= 1'b0;
+    always @(*) assert (q == 1'b0);
+endmodule
+""")
+    command = ["make", "-f", str(ROOT / "Makefile"), "formal", "FORMAL_PROPS=build_check:2"]
     if stale_model:
-        sources = " ".join(str(p) for p in sorted((ROOT / "src").glob("*.v")))
-        built = subprocess.run(command + [f"RTL_SOURCES={sources}"], cwd=tmp_path,
-                               capture_output=True, text=True)
+        built = subprocess.run(command + ["RTL_SOURCES="], cwd=tmp_path,
+                               capture_output=True, text=True, timeout=30)
         assert built.returncode == 0, built.stdout + built.stderr
-        assert (formal / "build/reset.smt2").exists()
+        assert (formal / "build/build_check.smt2").exists()
 
     failed = subprocess.run(command + ["RTL_SOURCES=missing.v"], cwd=tmp_path,
-                            capture_output=True, text=True)
+                            capture_output=True, text=True, timeout=30)
     output = failed.stdout + failed.stderr
     assert failed.returncode != 0, output
     assert "missing.v" in output
-    assert "formal: reset passed" not in output
+    assert "formal: build_check passed" not in output
