@@ -38,6 +38,8 @@ The Host decodes these records with `tools/pe/proto/can.py`.
 `capture.pasm` records the time of every edge on one pin, and `replay.pasm` plays a recording back on another pin, both exact to the cycle and without knowing the protocol.
 The edge capture unit (G3) timestamps each edge with the 32-bit cycle counter, so gaps up to 86 s at 50 MHz keep their exact length.
 `tools/pe/proto/waveform.py` converts between the two formats and edits recordings: `invert_span` drives any stretch of time to the opposite level.
+Capture requires receive-only buffering, autopush disabled, and an 8-cycle input filter.
+Nonblocking pushes keep timestamp reads from stalling when the Host falls behind; dropped words set receive overflow.
 `test/test_waveform.py` uses it to flip one data bit of a captured UART byte and checks that an independent UART receiver decodes the edited byte from the replay.
 
 This turns the chip into a recorder and signal generator for reverse engineering and fault injection on protocols it has no program for: record an unknown exchange, study it on the Host, then replay it, or a deliberately damaged version of it, to the device under test.
@@ -45,11 +47,13 @@ This turns the chip into a recorder and signal generator for reverse engineering
 | Property | Value |
 | --- | --- |
 | Resolution | 1 cycle (20 ns at 50 MHz) for both capture and replay |
-| Shortest pulse | 4 cycles, enforced by the 4-cycle glitch filter on the captured pin; replay holds each level at least 3 cycles |
-| Burst | 4 edges at the shortest spacing fill the 8-word receive queue |
-| Sustained capture | One edge per 80 cycles (1.6 µs at 50 MHz) with a Host draining at the minimum `HSCK` timing; one per 60 cycles overruns |
-| Lost edges | Reported by the capture overrun sticky bit |
+| Shortest pulse | 8 cycles, enforced by the 8-cycle glitch filter on the captured pin; replay holds each level at least 3 cycles |
+| Burst | 4 edges at the shortest spacing fill the 8-word receive queue after the Host drains the initial-level word |
+| Sustained capture | One edge per 80 cycles (1.6 µs at 50 MHz) with a continuous receive-port read at `HSCK=f_clk/10`; polling adds transaction overhead and needs slower edges |
+| Lost data | Overwritten edges set capture overrun; dropped timestamp words set receive overflow |
 | Replay | Every word holds 3 to 32,770 cycles; the Host must keep the 8-word transmit queue from running dry |
+
+Discard a recording if either sticky bit is set; lost data may leave timestamps incomplete or repeated.
 
 ## Limits found during verification
 

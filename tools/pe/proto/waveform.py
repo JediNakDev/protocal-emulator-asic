@@ -31,7 +31,7 @@ def intervals(times):
 def invert_span(level, times, start, end):
     """Invert the waveform between two times: as if the line were driven to
     the opposite level from `start` until `end`. Returns new (level, times)."""
-    edges = [t for t in times if not start <= t < end]
+    edges = list(times)
     edges += [start, end]
     edges.sort()
     out = []
@@ -47,7 +47,7 @@ def to_replay(level, times, lead=REPLAY_MIN):
     """Replay words: `level` for `lead` cycles, then each edge at the same
     distance from the previous one as in `times`. The level after the last
     edge holds until the queue runs dry."""
-    runs = [lead] + intervals(times) + [REPLAY_MIN]
+    runs = [lead] + (intervals(times) + [REPLAY_MIN] if times else [])
     words = []
     for i, run in enumerate(runs):
         if run < REPLAY_MIN:

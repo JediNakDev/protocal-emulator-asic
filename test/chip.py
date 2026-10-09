@@ -101,27 +101,27 @@ class Chip:
     def _hdo(self):
         return self.uo() & 0xF
 
-    async def xfer(self, out_bytes):
+    async def xfer(self, out_bytes, half=HALF):
         """One transaction. Returns the bytes the chip shifted out."""
         clk = self.dut.clk
         self._set_host(0, 0, 0)
-        await ClockCycles(clk, HALF)
+        await ClockCycles(clk, half)
         got = []
         for b in out_bytes:
             r = 0
             groups = [(b >> 4) & 0xF, b & 0xF] if self.quad else [(b >> (7 - i)) & 1 for i in range(8)]
             for g in groups:
                 self._set_host(0, 0, g)
-                await ClockCycles(clk, HALF)
+                await ClockCycles(clk, half)
                 hdo = self._hdo()
                 r = (r << 4) | hdo if self.quad else (r << 1) | (hdo & 1)
                 self._set_host(0, 1, g)
-                await ClockCycles(clk, HALF)
+                await ClockCycles(clk, half)
             got.append(r)
         self._set_host(0, 0, 0)
-        await ClockCycles(clk, HALF)
+        await ClockCycles(clk, half)
         self._set_host(1, 0, 0)
-        await ClockCycles(clk, HALF)
+        await ClockCycles(clk, half)
         return got
 
     async def write(self, addr, data):

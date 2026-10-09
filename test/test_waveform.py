@@ -24,9 +24,9 @@ async def setup(dut, idle):
     await chip.set_quad()
     cap = await chip.load_program("capture", CAPTURE_AT)
     rep = await chip.load_program("replay", REPLAY_AT)
-    await chip.pincfg(PIN_IN, regs.pin_filter(2))  # 4-cycle glitch filter
+    await chip.pincfg(PIN_IN, regs.pin_filter(3))  # 8-cycle glitch filter
     await chip.pincfg(PIN_OUT, regs.OWNER_E1 | regs.DRIVE_ALWAYS)
-    await chip.setup_engine(0, cap, CAPTURE_AT, shiftctrl=regs.AUTOPUSH | regs.fifo_mode(regs.FIFO_JOIN_RX),
+    await chip.setup_engine(0, cap, CAPTURE_AT, shiftctrl=regs.fifo_mode(regs.FIFO_JOIN_RX),
                             in_base=PIN_IN)
     await chip.ereg(0, regs.CAPCFG, [PIN_IN | (3 << 4) | (1 << 6), 0])  # both edges, flag 0
     await chip.setup_engine(1, rep, REPLAY_AT, shiftctrl=regs.AUTOPULL | regs.OUT_RIGHT |
@@ -61,7 +61,7 @@ async def record(chip, n_edges, timeout=2_000_000):
             await chip.cycles(20)
             idle += 20
             assert idle < timeout, f"captured {len(words)} words"
-    assert not (await chip.read8(regs.STICKY)) & regs.STK_CAP_OVR0, "capture overrun: an edge was lost"
+    assert not (await chip.read8(regs.STICKY)) & (regs.STK_CAP_OVR0 | regs.STK_RX_OVF0), "capture data was lost"
     return waveform.from_capture(words)
 
 
@@ -94,13 +94,13 @@ async def play(chip, words):
 
 @cocotb.test()
 async def test_capture_and_replay_exact(dut):
-    """Random edges, from 4 cycles apart to more than 2**16: every captured
+    """Random edges, from 8 cycles apart to more than 2**16: every captured
     and every replayed interval equals the driven one exactly."""
     chip = await setup(dut, 0)
     rng = random.Random(7)
     intervals = []
     for _ in range(12):
-        intervals += [rng.randint(4, 20) for _ in range(rng.randint(1, 3))]  # a burst
+        intervals += [rng.randint(8, 20) for _ in range(rng.randint(1, 3))]  # a burst
         intervals.append(rng.randint(1500, 4000))                             # Host catches up
     intervals[5] = 70_000   # longer than one replay word and than 16 bits
     intervals[17] = 100_003
@@ -143,3 +143,89 @@ async def test_edit_and_replay_uart(dut):
     rx = cocotb.start_soon(uart_receive(dut.clk, lambda: (chip.uo() >> 5) & 1, bit, len(data)))
     await play(chip, waveform.to_replay(level, times, lead=200))
     assert await rx == [0x55, 0xA3 ^ (1 << 3)]
+
+
+@cocotb.test()
+async def test_capture_backpressure_reports_loss(dut):
+    """A full receive queue must not hide a lost edge."""
+    chip = await setup(dut, 0)
+    await chip.enable(1)
+    await chip.cycles(20)
+    assert await chip.pop(0, 1) == [0]
+    for i in range(6):
+        chip.set_pin8((i + 1) & 1)
+        await chip.cycles(100)
+    assert await chip.levels(0) == (0, 8)
+    sticky = await chip.read8(regs.STICKY)
+    words = await chip.pop(0, 8)
+    await chip.cycles(30)
+    _, remaining = await chip.levels(0)
+    words += await chip.pop(0, remaining)
+    times = [lo | (hi << 16) for lo, hi in zip(words[::2], words[1::2])]
+    complete = len(times) == 6 and waveform.intervals(times) == [100] * 5
+    assert complete or sticky & (regs.STK_CAP_OVR0 | regs.STK_RX_OVF0), f"unreported edge loss: {times}, sticky={sticky:#x}"
+
+
+@cocotb.test()
+async def test_constant_recording_replay(dut):
+    """A recording with no transitions must retain its initial level."""
+    for level in (0, 1):
+        chip = await setup(dut, level)
+        words = waveform.to_replay(*waveform.from_capture([level]))
+        await chip.push(1, words)
+        await chip.enable(2)
+        await chip.cycles(20)
+        for _ in range(20):
+            await RisingEdge(dut.clk)
+            assert (chip.uo() >> 5) & 1 == level
+
+
+@cocotb.test()
+async def test_invert_span_replay_transitions(dut):
+    """An inversion preserves internal transitions and cancels boundary edges."""
+    for start, end, expected in ((120, 280, [100, 120, 200, 280, 300]),
+                                 (100, 300, [200])):
+        chip = await setup(dut, 0)
+        level, times = waveform.invert_span(0, [100, 200, 300], start, end)
+        watcher = cocotb.start_soon(watch(chip, len(times)))
+        await play(chip, waveform.to_replay(level, times, lead=100))
+        observed = await watcher
+        assert waveform.intervals(observed) == waveform.intervals(expected)
+        # Catch extra transitions after the expected final edge.
+        await chip.cycles(400)
+        assert (chip.uo() >> 5) & 1 == (level ^ (len(expected) & 1))
+
+
+@cocotb.test()
+async def test_capture_minimum_burst_all_phases(dut):
+    """Four minimum-width edges survive every phase of the five-cycle loop."""
+    for phase in range(5):
+        chip = await setup(dut, 0)
+        await chip.enable(1)
+        await chip.cycles(20)
+        assert await chip.pop(0, 1) == [0]
+        await chip.cycles(phase)
+        await drive(chip, 0, [8] * 4)
+        await chip.cycles(10)
+        words = await chip.pop(0, 8)
+        _, times = waveform.from_capture([0] + words)
+        assert not (await chip.read8(regs.STICKY)) & (regs.STK_CAP_OVR0 | regs.STK_RX_OVF0)
+        assert waveform.intervals(times) == [8] * 3
+
+
+@cocotb.test()
+async def test_capture_sustained_rate(dut):
+    """A continuous RX read keeps up at one edge per 80 cycles."""
+    chip = await setup(dut, 0)
+    await chip.enable(1)
+    await chip.cycles(20)
+    assert await chip.pop(0, 1) == [0]
+    driver = cocotb.start_soon(drive(chip, 0, [80] * 40))
+    await chip.cycles(160)  # prefill before starting the streaming read
+    # Four bytes per timestamp at HSCK=f_clk/10: exactly 80 cycles per edge.
+    data = (await chip.xfer([0x80 | regs.engine_reg(0, regs.FIFO)] + [0] * 160, half=5))[1:]
+    words = [lo | (hi << 8) for lo, hi in zip(data[::2], data[1::2])]
+    _, times = waveform.from_capture([0] + words)
+    await driver
+    assert not (await chip.read8(regs.STICKY)) & (regs.STK_CAP_OVR0 | regs.STK_RX_OVF0 | regs.STK_RX_UNF0)
+    assert waveform.intervals(times) == [80] * 39
