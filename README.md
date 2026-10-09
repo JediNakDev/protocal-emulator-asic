@@ -22,7 +22,7 @@ Start with UART, SPI, and I2C, and prove correctness before expanding the protoc
 Install [Homebrew](https://brew.sh/) and [uv](https://docs.astral.sh/uv/getting-started/installation/) if needed, then run:
 
 ```sh
-brew install icarus-verilog verilator yosys
+brew install icarus-verilog verilator yosys z3
 uv python install 3.11
 make setup
 make check
@@ -30,13 +30,15 @@ make check
 
 `make setup` creates `.venv` using a uv-managed Python 3.11 and installs the template's pinned cocotb and pytest dependencies.
 The root Makefile adds `.venv/bin` to the command path, so activating the environment is optional.
-On Ubuntu, install `iverilog`, `verilator`, `yosys`, and `make` with apt instead of Homebrew, then use the same uv commands.
+On Ubuntu, install `iverilog`, `verilator`, `yosys`, `z3`, and `make` with apt instead of Homebrew, then use the same uv commands.
+The formal checks require `yosys-smtbmc` (provided by Yosys) and the Z3 solver.
 
 ```sh
 make test   # Simulate with Icarus Verilog and cocotb
 make lint   # Check RTL with Verilator; warnings fail the command
 make synth-check # Check RTL drivers with Yosys before optimization
-make check  # Run lint, synthesis checks and simulation
+make formal # Prove the fetch, buffer occupancy and reset properties
+make check  # Run lint, synthesis checks, formal proofs, tooling tests and simulation
 make clean  # Remove simulation outputs
 ```
 

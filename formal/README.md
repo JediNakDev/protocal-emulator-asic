@@ -1,6 +1,8 @@
 # Formal checks
 
 `make formal` (part of `make check`) proves these properties with `yosys-smtbmc` and `z3`.
+Install Z3 alongside Yosys as described in the root README.
+Each run regenerates the SMT model and stops on synthesis errors before invoking the solver, including when an older model already exists.
 Each harness instantiates RTL from `../src` and states its property in terms of `docs/spec.md`.
 
 | File | Property | Method |
