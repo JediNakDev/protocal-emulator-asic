@@ -101,7 +101,7 @@ module tt_um_jedinakdev_protocol_emulator (
   );
 
   // ----------------------------------------------------- instruction memory
-  wire [5:0]  pc0, pc1;
+  wire [5:0]  fetch0, fetch1;
   wire [15:0] instr0, instr1;
 
   pe_imem u_imem (
@@ -110,9 +110,9 @@ module tt_um_jedinakdev_protocol_emulator (
       .we    (imem_we),
       .waddr (imem_addr),
       .wdata (imem_wdata),
-      .raddr0(pc0),
+      .raddr0(fetch0),
       .rdata0(instr0),
-      .raddr1(pc1),
+      .raddr1(fetch1),
       .rdata1(instr1)
   );
 
@@ -188,8 +188,11 @@ module tt_um_jedinakdev_protocol_emulator (
       .fifo_clear    (fifo_clear[0]),
       .div_sync      (div_sync),
       .dbg_sel       (dbg_sel),
-      .pc_o          (pc0),
+      .fetch_addr    (fetch0),
       .imem_data     (instr0),
+      .imem_we       (imem_we),
+      .imem_waddr    (imem_addr),
+      .imem_wdata    (imem_wdata),
       .pins_in       (pins_in),
       .pin_out       (e0_out),
       .pin_dir       (e0_dir),
@@ -232,8 +235,11 @@ module tt_um_jedinakdev_protocol_emulator (
       .fifo_clear    (fifo_clear[1]),
       .div_sync      (div_sync),
       .dbg_sel       (dbg_sel),
-      .pc_o          (pc1),
+      .fetch_addr    (fetch1),
       .imem_data     (instr1),
+      .imem_we       (imem_we),
+      .imem_waddr    (imem_addr),
+      .imem_wdata    (imem_wdata),
       .pins_in       (pins_in),
       .pin_out       (e1_out),
       .pin_dir       (e1_dir),

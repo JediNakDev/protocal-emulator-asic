@@ -24,6 +24,7 @@ They do not cover pad timing, metastability, clock duty cycle or analog front en
 | Low-speed USB | Host | 14 + 8 | G2 clock-recovering NRZI receiver, pattern wait, both engines | 48 MHz, 1.5 Mbit/s | GET_DESCRIPTOR (SETUP, DATA0, ACK, IN, DATA1, ACK) with device clocks exact, 1.5% fast and 1.5% slow |
 | 10BASE-T | Transmitter | 15 | G8 indexed jump, 2-pin side-set | 40 MHz, 10 Mbit/s | 89-byte frame, TD- complementary, TP_IDL, FCS |
 | 10BASE-T | Receiver | 9 | G2 Manchester decoder, falling-edge sampling (pin 15), emit into ISR | 40 MHz, 10 Mbit/s | Frames at five input phases and with +/- 8 ns jitter per transition |
+| Any (waveform) | Capture and replay | 5 + 3 | Edge capture (G3), flag wait, autopush/autopull | 50 MHz, 1-cycle resolution | Random edges 4 to 100,003 cycles apart, captured and replayed with every interval exact; a UART byte edited on the Host and decoded by an independent receiver |
 
 The largest pair that must run together, CAN transmit plus receive, uses 35 of the 64 instruction words.
 
@@ -31,6 +32,28 @@ CAN receive requires a push threshold of 15 and shifts left, packing each data w
 The final data word contains a 1 marker followed by zero padding, and `0xFFFF` separates records.
 This framing preserves all payload values after destuffing, including consecutive `0xFF` bytes.
 The Host decodes these records with `tools/pe/proto/can.py`.
+
+## Waveform capture and replay
+
+`capture.pasm` records the time of every edge on one pin, and `replay.pasm` plays a recording back on another pin, both exact to the cycle and without knowing the protocol.
+The edge capture unit (G3) timestamps each edge with the 32-bit cycle counter, so gaps up to 86 s at 50 MHz keep their exact length.
+`tools/pe/proto/waveform.py` converts between the two formats and edits recordings: `invert_span` drives any stretch of time to the opposite level.
+Capture requires receive-only buffering, autopush disabled, and an 8-cycle input filter.
+Nonblocking pushes keep timestamp reads from stalling when the Host falls behind; dropped words set receive overflow.
+`test/test_waveform.py` uses it to flip one data bit of a captured UART byte and checks that an independent UART receiver decodes the edited byte from the replay.
+
+This turns the chip into a recorder and signal generator for reverse engineering and fault injection on protocols it has no program for: record an unknown exchange, study it on the Host, then replay it, or a deliberately damaged version of it, to the device under test.
+
+| Property | Value |
+| --- | --- |
+| Resolution | 1 cycle (20 ns at 50 MHz) for both capture and replay |
+| Shortest pulse | 8 cycles, enforced by the 8-cycle glitch filter on the captured pin; replay holds each level at least 3 cycles |
+| Burst | 4 edges at the shortest spacing fill the 8-word receive queue after the Host drains the initial-level word |
+| Sustained capture | One edge per 80 cycles (1.6 µs at 50 MHz) with a continuous receive-port read at `HSCK=f_clk/10`; polling adds transaction overhead and needs slower edges |
+| Lost data | Overwritten edges set capture overrun; dropped timestamp words set receive overflow |
+| Replay | Every word holds 3 to 32,770 cycles; the Host must keep the 8-word transmit queue from running dry |
+
+Discard a recording if either sticky bit is set; lost data may leave timestamps incomplete or repeated.
 
 ## Limits found during verification
 

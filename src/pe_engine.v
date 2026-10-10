@@ -29,9 +29,12 @@ module pe_engine #(
     input  wire        fifo_clear,
     input  wire        div_sync,
     input  wire [2:0]  dbg_sel,
-    // Instruction memory
-    output wire [5:0]  pc_o,
+    // Instruction memory: one read port, and the Host write port for snooping
+    output wire [5:0]  fetch_addr,
     input  wire [15:0] imem_data,
+    input  wire        imem_we,
+    input  wire [5:0]  imem_waddr,
+    input  wire [15:0] imem_wdata,
     // Pins
     input  wire [15:0] pins_in,
     output reg  [12:0] pin_out,
@@ -58,6 +61,14 @@ module pe_engine #(
     output wire        st_host_tx_ovf,
     output wire        st_host_rx_unf,
     output reg         st_cap_ovr
+`ifdef FORMAL
+    ,
+    // Fetch state for formal/fetch.v
+    output wire [5:0]  f_pc,
+    output wire [15:0] f_ir,
+    output wire [15:0] f_cur,
+    output wire        f_exec_valid
+`endif
 );
 
   localparam [4:0] SIXTEEN = 5'd16;
@@ -209,7 +220,9 @@ module pe_engine #(
 
   // ======================================================== execution state
   reg [5:0]  pc;
-  reg [15:0] x, y, isr, osr, exec_instr;
+  reg [15:0] ir;   // the instruction memory word at PC, fetched one cycle ahead
+  reg [15:0] cur;  // the instruction the next issue runs: the exec slot if full, else `ir`
+  reg [15:0] x, y, isr, osr;
   reg [4:0]  isr_cnt, osr_cnt, delay_cnt;
   reg [15:0] div_cnt;
   reg        exec_valid, irqw;
@@ -276,9 +289,9 @@ module pe_engine #(
   assign st_rx_ovf   = rx_drop;
   assign st_host_rx_unf = h_rx_unf | (rx_read_commit & rx_read_empty);
 
-  assign pc_o = pc;
-
-  wire [15:0] instr = exec_valid ? exec_instr : imem_data;
+  // Decoding starts from a register: the exec slot selection happened when
+  // `cur` was loaded.
+  wire [15:0] instr = cur;
   wire [2:0]  op = instr[15:13];
   wire [3:0]  fld = instr[7:4];  // `in` source / `out` destination
   wire [4:0]  nbits = (instr[3:0] == 4'd0) ? SIXTEEN : {1'b0, instr[3:0]};
@@ -313,14 +326,14 @@ module pe_engine #(
   // ------------------------------------------------------------- helpers
   // Write `cnt` bits of `data` to pins base, base+1, ... (modulo 16).
   function [12:0] wr_range;
-    input [12:0] cur;
+    input [12:0] old;
     input [3:0]  base;
     input [4:0]  cnt;
     input [15:0] data;
     integer k;
     reg [3:0] o;
     begin
-      wr_range = cur;
+      wr_range = old;
       for (k = 0; k < 13; k = k + 1) begin
         o = k[3:0] - base;
         if ({1'b0, o} < cnt) wr_range[k] = data[o];
@@ -420,6 +433,38 @@ module pe_engine #(
                                       : ((isr << nbits) | (in_data & mask_n));
   wire [4:0]  isr_cnt_in = sat16({1'b0, isr_cnt} + {1'b0, nbits});
 
+  // ------------------------------------------------------------- fetch
+  // `ir` always holds the instruction memory word at PC, as the memory reads
+  // at the start of the cycle, and `cur` holds the exec slot or `ir`. Whether an instruction would jump, and where,
+  // depends only on state, so the next word is read while the instruction
+  // executes; the late stall decision then only chooses between that word and
+  // `ir`. The Host write port is snooped, so a write takes effect at the end
+  // of the cycle that carries it, as if the engine read the memory directly.
+  reg jmp_cond;
+  always @(*) begin
+    case ({instr[13], instr[7:6]})
+      3'd0: jmp_cond = 1'b1;
+      3'd1: jmp_cond = (x == 16'd0);
+      3'd2: jmp_cond = (x != 16'd0);
+      3'd3: jmp_cond = (y == 16'd0);
+      3'd4: jmp_cond = (y != 16'd0);
+      3'd5: jmp_cond = (x != y);
+      3'd6: jmp_cond = jmp_pat ? pat_match : pins_in[jmp_pin];
+      default: jmp_cond = ~osr_empty;
+    endcase
+  end
+
+  wire       op_jmp = (op[2:1] == 2'b00);
+  wire       out_pc = (op == OP_OUT) & (fld == OUT_PC);
+  wire       mov_pc = (op == OP_MOV) & (instr[7:5] == 3'd5);
+  wire       jumps = (op_jmp & jmp_cond) | out_pc | mov_pc;
+  wire [5:0] jtarget = out_pc ? (jmp_base + out_data[5:0]) : mov_pc ? mov_val[5:0] : instr[5:0];
+  wire [5:0] pc_seq = (pc == wrap_top) ? wrap_bot : pc + 6'd1;
+
+  assign fetch_addr = jumps ? jtarget : pc_seq;
+  wire [15:0] fetch_word = (imem_we && imem_waddr == fetch_addr) ? imem_wdata : imem_data;
+  wire [15:0] hold_word = (imem_we && imem_waddr == pc) ? imem_wdata : ir;
+
   // An emission conflicts with instructions that modify the ISR or step the
   // checksum register; they stall for that cycle.
   wire touch_isr = (op == OP_IN) |
@@ -431,13 +476,13 @@ module pe_engine #(
 
   // ============================================================ next state
   reg [5:0]  n_pc;
+  reg [15:0] n_ir, n_cur;
   reg [15:0] n_x, n_y, n_isr, n_osr, n_exec_instr;
   reg [4:0]  n_isr_cnt, n_osr_cnt, n_delay;
   reg [12:0] n_pin_out, n_pin_dir;
   reg        n_exec_valid, n_irqw;
   reg [31:0] n_lfsr;
-  reg        stall, jump, exec_new, cond, wcond;
-  reg [5:0]  jtarget;
+  reg        stall, exec_new, wcond;
   reg        emit_b;
   reg [7:0]  i_flag_set;
   reg [15:0] isr_e;
@@ -445,6 +490,7 @@ module pe_engine #(
 
   always @(*) begin
     n_pc         = pc;
+    n_ir         = hold_word;
     n_x          = x;
     n_y          = y;
     n_isr        = isr;
@@ -454,15 +500,12 @@ module pe_engine #(
     n_pin_out    = pin_out;
     n_pin_dir    = pin_dir;
     n_exec_valid = exec_valid;
-    n_exec_instr = exec_instr;
+    n_exec_instr = cur;
     n_irqw       = irqw;
     n_delay      = delay_cnt;
     n_lfsr       = lfsr_val;
     stall        = 1'b0;
-    jump         = 1'b0;
-    jtarget      = 6'd0;
     exec_new     = 1'b0;
-    cond         = 1'b0;
     wcond        = 1'b0;
     e_tx_pop     = 1'b0;
     e_rx_push    = 1'b0;
@@ -485,19 +528,12 @@ module pe_engine #(
         stall = 1'b1;
       end else begin
         case (op)
-          3'd0, 3'd1: begin  // jmp
+          3'd0, 3'd1: begin  // jmp; the condition and target are computed above
             case ({instr[13], instr[7:6]})
-              3'd0: cond = 1'b1;
-              3'd1: cond = (x == 16'd0);
-              3'd2: begin cond = (x != 16'd0); n_x = x - 16'd1; end
-              3'd3: cond = (y == 16'd0);
-              3'd4: begin cond = (y != 16'd0); n_y = y - 16'd1; end
-              3'd5: cond = (x != y);
-              3'd6: cond = jmp_pat ? pat_match : pins_in[jmp_pin];
-              default: cond = ~osr_empty;
+              3'd2: n_x = x - 16'd1;
+              3'd4: n_y = y - 16'd1;
+              default: ;
             endcase
-            jump    = cond;
-            jtarget = instr[5:0];
           end
 
           OP_WAIT: begin
@@ -543,10 +579,6 @@ module pe_engine #(
                 OUT_X: n_x = out_data;
                 OUT_Y: n_y = out_data;
                 OUT_PINDIRS: n_pin_dir = wr_range(pin_dir, out_base, out_cnt, out_data);
-                OUT_PC: begin
-                  jump    = 1'b1;
-                  jtarget = jmp_base + out_data[5:0];
-                end
                 OUT_ISR: begin
                   n_isr     = out_data;
                   n_isr_cnt = nbits;
@@ -634,10 +666,7 @@ module pe_engine #(
                 n_exec_instr = mov_val;
                 exec_new     = 1'b1;
               end
-              3'd5: begin
-                jump    = 1'b1;
-                jtarget = mov_val[5:0];
-              end
+              3'd5: ;  // pc: computed above
               3'd6: begin
                 n_isr     = mov_val;
                 n_isr_cnt = 5'd0;
@@ -670,8 +699,10 @@ module pe_engine #(
       end
 
       if (!stall) begin
-        if (jump) n_pc = jtarget;
-        else if (!exec_valid) n_pc = (pc == wrap_top) ? wrap_bot : pc + 6'd1;
+        if (jumps || !exec_valid) begin
+          n_pc = fetch_addr;
+          n_ir = fetch_word;
+        end
         n_exec_valid = exec_new;
         n_delay      = exec_new ? 5'd0 : dly;
       end
@@ -698,12 +729,16 @@ module pe_engine #(
     end
   end
 
+  always @(*) n_cur = n_exec_valid ? n_exec_instr : n_ir;
+
   // ============================================================ registers
   wire lfsr_host_wr = wr & (off[4:2] == 3'b110);  // 0x18-0x1B
 
   always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       pc         <= 6'd0;
+      ir         <= 16'd0;
+      cur        <= 16'd0;
       x          <= 16'd0;
       y          <= 16'd0;
       isr        <= 16'd0;
@@ -712,7 +747,6 @@ module pe_engine #(
       osr_cnt    <= SIXTEEN;
       delay_cnt  <= 5'd0;
       exec_valid <= 1'b0;
-      exec_instr <= 16'd0;
       irqw       <= 1'b0;
       stalled    <= 1'b0;
       pin_out    <= 13'd0;
@@ -720,6 +754,7 @@ module pe_engine #(
       lfsr_val   <= 32'd0;
     end else begin
       pc      <= n_pc;
+      ir      <= n_ir;
       x       <= n_x;
       y       <= n_y;
       pin_out <= n_pin_out;
@@ -731,6 +766,7 @@ module pe_engine #(
         osr_cnt    <= SIXTEEN;
         delay_cnt  <= 5'd0;
         exec_valid <= 1'b0;
+        cur        <= n_ir;
         irqw       <= 1'b0;
         stalled    <= 1'b0;
       end else begin
@@ -740,13 +776,13 @@ module pe_engine #(
         osr_cnt    <= n_osr_cnt;
         delay_cnt  <= n_delay;
         exec_valid <= n_exec_valid;
-        exec_instr <= n_exec_instr;
+        cur        <= n_cur;
         irqw       <= n_irqw;
         if (issue) stalled <= stall;
       end
       // A forced instruction from the Host wins over the engine.
       if (forced_wr) begin
-        exec_instr <= {bus_wdata, bus_lo_hold};
+        cur        <= {bus_wdata, bus_lo_hold};
         exec_valid <= 1'b1;
       end
       // A Host write wins over an engine update in the same cycle.
@@ -773,6 +809,8 @@ module pe_engine #(
   reg  cap_prev;
   wire cap_in = pins_in[cap_pin];
   wire cap_ev = (cap_edge[0] & cap_in & ~cap_prev) | (cap_edge[1] & ~cap_in & cap_prev);
+  // Selecting another pin is not an edge: start from that pin's level.
+  wire capcfg_wr = wr & (off == 5'h0D);
 
   always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
@@ -780,7 +818,7 @@ module pe_engine #(
       capture    <= 32'd0;
       st_cap_ovr <= 1'b0;
     end else begin
-      cap_prev   <= cap_in;
+      cap_prev   <= capcfg_wr ? pins_in[bus_wdata[3:0]] : cap_in;
       st_cap_ovr <= cap_ev & cap_flag_en & flags[cap_flag];
       if (cap_ev) capture <= counter;
     end
@@ -844,5 +882,12 @@ module pe_engine #(
   end
 
   assign flag_set = i_flag_set | cap_flag_set;
+
+`ifdef FORMAL
+  assign f_pc = pc;
+  assign f_ir = ir;
+  assign f_cur = cur;
+  assign f_exec_valid = exec_valid;
+`endif
 
 endmodule
