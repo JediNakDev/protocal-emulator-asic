@@ -21,13 +21,14 @@ The priorities and acceptance criteria below are this project's working plan.
 The current architecture and instruction semantics are defined in [spec.md](spec.md).
 The initial single-engine UART exercise has been superseded by the implemented programmable design.
 Recorded builds meet 50 MHz at the typical corner; all-corner setup closure remains open.
-Changes after those measurements need a new routed build before their physical results are known.
+The latest measured RTL (`17995b3`) reaches +4.05 ns typical-corner setup slack and -4.14 ns slow-corner setup slack.
 
 ## 1. Confirm physical closure
 
 This is the next priority.
-Publish a prerelease from the current source to run GDS and the timing estimate as described in [the release guide](releasing.md).
-Compare the final reports with the recorded builds, including the cost of the fetch, decode, Host command, and setup-margin changes.
+Use the routed results for `17995b3` as the baseline for the next timing changes.
+Publish a prerelease after each selected change to run GDS and the timing estimate as described in [the release guide](releasing.md).
+Compare the final reports with that baseline, including the area cost and remaining timing and electrical violations.
 
 Complete this milestone when:
 

@@ -34,7 +34,7 @@ Selected formal checks cover fetch consistency, buffer occupancy, and safe reset
 
 Publishing a release or prerelease runs CMOS5L hardening, precheck, functional gate-level tests, and a separate global-route timing estimate.
 Recorded routed builds meet 50 MHz at the typical corner but fail setup timing at the slow corner.
-The latest source still needs routed confirmation; [the area log](area-log.md) records the exact source for each measurement.
+The latest measured RTL (`17995b3`) has +4.05 ns typical-corner setup slack and -4.14 ns slow-corner setup slack; [the area log](area-log.md) records the source and reports for each measurement.
 
 On the demo board, the RP2040 acts as Host:
 

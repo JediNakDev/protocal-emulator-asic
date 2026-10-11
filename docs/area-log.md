@@ -90,3 +90,32 @@ Findings that shape the next steps:
 - Signals may use only Metal2 to Metal4, so routing is congested: detailed routing alone took between 2 h 20 min and 4 h 36 min for nearly the same netlist.
 - `SYNTH_STRATEGY` `DELAY 4` improved the estimate by about 8 ns at the slow corner for 8% more cell area (469,229 µm²), but that build did not finish detailed routing within GitHub's 6 hour job limit.
   Timing-driven placement with timing repair after global routing gave no gain beyond the spread between runs and doubled the time to global routing.
+
+## 2026-10-10: current main with registered commands and setup margin
+
+Source: `main` at `17995b3`, including the fetch/decode registers, registered Host commands, verification fixes, and waveform capture/replay programs.
+Build: [GDS run 38056908515](https://github.com/JediNakDev/protocal-emulator-asic/actions/runs/38056908515) on CMOS5L, with `CLOCK_PERIOD` 20 ns, `PL_TARGET_DENSITY_PCT` 60, `SYNTH_STRATEGY` `AREA 0`, and `PL_RESIZER_SETUP_SLACK_MARGIN` 7 ns.
+The GDS, precheck, functional gate-level test, and viewer jobs all passed.
+The values below come from `tt_submission/stats/metrics.csv` in the run's `tt_submission` artifact; `commit_id.json` confirms the source commit.
+
+| Measure | Value |
+| --- | --- |
+| Standard cell area | 436,690 µm², 48.39% utilization |
+| Timing repair buffers | 76,914 µm² |
+| Clock buffers and inverters | 7,949 µm² |
+| Routed wire length | 2.02 m |
+
+| Corner | Setup worst slack | Setup total negative slack | Hold worst slack |
+| --- | --- | --- | --- |
+| Typical, 1.20 V, 25 C | +4.05 ns | 0 | +0.29 ns |
+| Slow, 1.08 V, 125 C | -4.14 ns | -94.37 ns | +0.61 ns |
+| Fast, 1.32 V, -40 C | +5.81 ns | 0 | +0.11 ns |
+
+The build improves slow-corner setup slack compared with the earlier routed results but still does not close 50 MHz at every corner.
+The flow reports success because its timing sign-off filter is still `*typ*`.
+Hold timing passes at all three corners.
+Remaining electrical violations include 228 maximum fanout violations, up to 221 maximum slew violations, and up to 21 maximum capacitance violations.
+
+The same source's [global-route timing estimate, run 38056908556](https://github.com/JediNakDev/protocal-emulator-asic/actions/runs/38056908556), reported +2.62 ns slow-corner setup slack and 435,792 µm² of standard cell area.
+Detailed routing changed that slow-corner result to -4.14 ns, a 6.76 ns loss of margin.
+Use the final routed reports when assessing operating limits.

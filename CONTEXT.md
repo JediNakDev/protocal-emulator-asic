@@ -32,7 +32,7 @@ The implemented architecture has two engines, shared writable instruction memory
 
 Verification includes top-level cocotb tests with independent protocol peers, random cycle-by-cycle comparisons against a specification-based Python model, and formal checks for selected properties.
 Recorded CMOS5L builds passed hardening, precheck, and functional gate-level simulation and met 50 MHz at the typical corner.
-The recorded slow-corner setup results fail the target; the latest RTL and configuration changes still require routed measurements.
+The latest measured RTL (`17995b3`) has +4.05 ns typical-corner setup slack and -4.14 ns slow-corner setup slack, so all-corner closure remains open.
 Use [docs/area-log.md](docs/area-log.md) to identify which source commit each physical result covers.
 
 Physical CI runs on published releases and prereleases.

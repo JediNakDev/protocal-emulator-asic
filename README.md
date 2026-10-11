@@ -14,7 +14,7 @@ See [protocol coverage and limits](docs/protocols.md) for the supported roles, t
 The programmable core, protocol programs, independent peer tests, random reference-model comparisons, and selected formal checks are implemented.
 Recorded CMOS5L builds passed hardening, precheck, and functional gate-level simulation.
 Those builds met the 50 MHz target at the typical corner but failed setup timing at the slow corner.
-The latest RTL and timing configuration need a new routed build before claiming timing closure.
+The latest measured RTL (`17995b3`) has +4.05 ns typical-corner setup slack and -4.14 ns slow-corner setup slack, so all-corner timing closure remains open.
 [The area log](docs/area-log.md) ties each measurement to its source state; [the roadmap](docs/roadmap.md) defines the remaining work.
 
 | Setting | Value |
