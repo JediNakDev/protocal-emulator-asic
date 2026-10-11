@@ -7,7 +7,9 @@
 # spreads by a few nanoseconds between runs. Use it to compare changes; the
 # gds workflow remains the sign-off.
 name: timing
-on: [push, workflow_dispatch]
+on:
+  release:
+    types: [published]
 jobs:
   timing:
     runs-on: ubuntu-24.04
@@ -54,7 +56,7 @@ jobs:
 
       - name: Static timing analysis per corner
         run: |
-          STATE=$(ls runs/wokwi/*/state_out.json | sort -V | tail -1)
+          STATE=$(find runs/wokwi -mindepth 2 -maxdepth 2 -type f -name state_out.json | sort -V | tail -1)
           for corner in nom_slow_1p08V_125C nom_typ_1p20V_25C nom_fast_1p32V_m40C; do
             mkdir -p "runs/sta-$corner"
             $LL --run-tag "sta-$corner" --force-run-dir "runs/sta-$corner" \
@@ -70,13 +72,15 @@ jobs:
             echo "| Corner | Setup worst slack (ns) | Setup total negative slack (ns) | Hold worst slack (ns) |"
             echo "| --- | --- | --- | --- |"
             for d in runs/sta-*; do
-              m=$(ls "$d"/*/or_metrics_out.json)
+              m=$(find "$d" -mindepth 2 -maxdepth 2 -type f -name or_metrics_out.json)
               c=${d#runs/sta-}
               jq -r --arg c "$c" '"| \($c) | \(.["timing__setup__ws__corner:" + $c]) | \(.["timing__setup__tns__corner:" + $c]) | \(.["timing__hold__ws__corner:" + $c]) |"' "$m"
             done
             echo
-            area=$(for f in $(ls runs/wokwi/*/or_metrics_out.json | sort -V); do
-              jq -r '.["design__instance__area__stdcell"] // empty' "$f"; done | tail -1)
+            area=$(find runs/wokwi -mindepth 2 -maxdepth 2 -type f -name or_metrics_out.json | sort -V |
+              while IFS= read -r f; do
+                jq -r '.["design__instance__area__stdcell"] // empty' "$f"
+              done | tail -1)
             echo "Standard cell area: $area µm²"
           } | tee -a "$GITHUB_STEP_SUMMARY"
 

@@ -1,25 +1,34 @@
 # Programmable Protocol Emulator ASIC
 
-Starter workspace for [Jane Street's protocol emulator ASIC competition](https://blog.janestreet.com/protocol-emulator-asic-competition/), based on the [Tiny Tapeout CMOS5L Verilog template](https://github.com/TinyTapeout/ttihp-verilog-template/tree/cmos5l).
-The RTL implements the programmable emulator defined in [docs/spec.md](docs/spec.md): two engines, a shared bit state machine, checksum and capture units, and a Host port.
-UART, SPI, I2C, JTAG, SWD, PS/2, CAN, low-speed USB and 10BASE-T run as programs in simulation ([docs/protocols.md](docs/protocols.md)); the design has not yet been through a CMOS5L GDS build.
+An open-source chip for hardware debugging, protocol experiments, and reverse engineering, built for [Jane Street's protocol emulator ASIC competition](https://blog.janestreet.com/protocol-emulator-asic-competition/).
+Upload programs through the Host port to change protocol behavior after fabrication.
+The same RTL runs UART, SPI, I2C, JTAG, SWD, PS/2, CAN, low-speed USB, and 10BASE-T programs in simulation.
 
-## Competition configuration
+Two programmable engines share 64 instruction words and control 13 protocol pins.
+General building blocks provide checksums, line decoding, edge timestamps, input filtering, and cycle-exact pin operations.
+Capture and replay programs can record a waveform, edit it on the Host, and replay it for fault injection without decoding its protocol.
+See [protocol coverage and limits](docs/protocols.md) for the supported roles, timing, buffering requirements, and external hardware.
 
-- Process: IHP 130nm CMOS5L (`ihp-sg13cmos5l`).
-- Allocation: `6x4` tiles, set in [info.yaml](info.yaml).
-- Top module: `tt_um_jedinakdev_protocol_emulator`.
-- Initial clock target: 50 MHz, matching the template's 20 ns `CLOCK_PERIOD`.
-- Deadline: January 18, 2027, according to the [competition announcement](https://blog.janestreet.com/protocol-emulator-asic-competition/).
-- License: Apache-2.0.
+## Current status
 
-The clock frequency is a design target; verify it with post-route timing once the emulator exists.
-The competition calls for a reprogrammable engine that can implement new protocols after fabrication.
-Start with UART, SPI, and I2C, and prove correctness before expanding the protocol set.
+The programmable core, protocol programs, independent peer tests, random reference-model comparisons, and selected formal checks are implemented.
+Recorded CMOS5L builds passed hardening, precheck, and functional gate-level simulation.
+Those builds met the 50 MHz target at the typical corner but failed setup timing at the slow corner.
+The latest RTL and timing configuration need a new routed build before claiming timing closure.
+[The area log](docs/area-log.md) ties each measurement to its source state; [the roadmap](docs/roadmap.md) defines the remaining work.
 
-## Local setup on macOS
+| Setting | Value |
+| --- | --- |
+| Process | IHP 130nm CMOS5L (`ihp-sg13cmos5l`) |
+| Allocation | 6x4 Tiny Tapeout tiles |
+| Top module | `tt_um_jedinakdev_protocol_emulator` |
+| Clock target | 50 MHz (`CLOCK_PERIOD=20` ns) |
+| Submission deadline | January 18, 2027, per the [competition announcement](https://blog.janestreet.com/protocol-emulator-asic-competition/) |
+| License | Apache-2.0 |
 
-Install [Homebrew](https://brew.sh/) and [uv](https://docs.astral.sh/uv/getting-started/installation/) if needed, then run:
+## Run the checks
+
+On macOS, install [Homebrew](https://brew.sh/) and [uv](https://docs.astral.sh/uv/getting-started/installation/), then run:
 
 ```sh
 brew install icarus-verilog verilator yosys z3
@@ -28,73 +37,78 @@ make setup
 make check
 ```
 
-`make setup` creates `.venv` using a uv-managed Python 3.11 and installs the template's pinned cocotb and pytest dependencies.
-The root Makefile adds `.venv/bin` to the command path, so activating the environment is optional.
-On Ubuntu, install `iverilog`, `verilator`, `yosys`, `z3`, and `make` with apt instead of Homebrew, then use the same uv commands.
-The formal checks require `yosys-smtbmc` (provided by Yosys) and the Z3 solver.
+On Ubuntu, install `iverilog`, `verilator`, `yosys`, `z3`, and `make` with apt, then run the same uv and Make commands.
+`make setup` creates `.venv` with a uv-managed Python 3.11 and installs the pinned test dependencies.
+The root Makefile adds `.venv/bin` to `PATH`, so activation is optional for root commands.
+Formal checks require `yosys-smtbmc` and Z3; CI uses a current OSS CAD Suite and Yices.
 
-```sh
-make test   # Simulate with Icarus Verilog and cocotb
-make lint   # Check RTL with Verilator; warnings fail the command
-make synth-check # Check RTL drivers with Yosys before optimization
-make formal # Prove the fetch, buffer occupancy and reset properties
-make check  # Run lint, synthesis checks, formal proofs, tooling tests and simulation
-make clean  # Remove simulation outputs
-```
+| Command | Purpose |
+| --- | --- |
+| `make check` | Run lint, synthesis checks, formal checks, tooling regressions, and RTL simulation |
+| `make test` | Run cocotb tests with Icarus Verilog |
+| `make test LATCH=yes` | Run the RTL suite with latch storage |
+| `make lint` | Check both storage variants with Verilator; warnings fail |
+| `make synth-check` | Check RTL drivers with Yosys before optimization |
+| `make formal` | Check fetch consistency, queue occupancy, and safe reset outputs |
+| `make test-tooling` | Test the verification commands' failure handling |
+| `make model` | Build and test the earlier C architecture model |
+| `make clean` | Remove simulation, model, and formal build outputs |
 
-Simulation saves the waveform to `test/tb.fst` and the JUnit report to `test/results.xml`.
-Open the waveform in the Surfer VS Code extension, or a separately installed GTKWave.
+Simulation writes `test/tb.fst` and `test/results.xml`.
+Open the waveform with Surfer or GTKWave.
+[The testbench guide](test/README.md) explains targeted runs, random seeds, and gate-level simulation.
 
-## Earlier C architecture model
+## Load and run a program
 
-[model/](model/README.md) preserves the earlier four-engine architecture exploration at 40 MHz.
-UART, SPI and I2C, plus USB low-speed host and 10BASE-T transmit, run there as engine programs.
-They are checked by models of real parts (USB-UART bridge, W25Q128JV flash, ADT7420 sensor, USB keyboard, 10BASE-T receiver) against the pass criteria in [model/CRITERIA.md](model/CRITERIA.md).
-Its ISA, Host interface and resource budget differ from the implemented two-engine RTL defined in [docs/spec.md](docs/spec.md).
-Its results apply to that earlier model; it is not a reference model for the current RTL.
-Run it with `make model`.
+The Host uses an SPI-style mode-0 port that starts in 1-bit mode and can switch to 4-bit transfers.
+Hold `HCS_N` high and `HSCK` low while idle.
+After reset, read register `0x00` by sending `0x80` and one dummy byte; the returned data byte is `0x50`.
+Load instruction words through `IMEM_ADDR` and `IMEM_DATA`, configure the engine and pin ownership, then enable the engine through `CTRL`.
+Instruction memory is undefined after reset and must be written before execution.
 
-## Where to work
+The [specification](docs/spec.md) defines the register map, instruction encoding, cycle counts, stalls, sampling latency, and reset behavior.
+Program comments in [programs/](programs/) describe their required configuration and data packing.
+The assembler is a Python library in [tools/pe/asm.py](tools/pe/asm.py); [test/chip.py](test/chip.py) demonstrates loading programs through the top-level Host pins.
 
-- [docs/spec.md](docs/spec.md): pinout, register map, instruction set and timing; the RTL must match it.
-- [src/project.v](src/project.v): Tiny Tapeout top-level wrapper; the other `src/pe_*.v` files are its blocks.
-- [info.yaml](info.yaml): metadata, tile allocation, source list, and pin descriptions.
-- [src/config.json](src/config.json): physical implementation settings.
-- [programs](programs): protocol programs; [docs/protocols.md](docs/protocols.md) lists what each one covers and its limits.
-- [tools/pe](tools/pe): assembler, register map and bit state machine tables; [tools/pe/proto](tools/pe/proto) holds the host-side protocol software.
-- [test/chip.py](test/chip.py): cocotb Host model that drives only the top-level pins.
-- [test/peers.py](test/peers.py): independent UART, SPI and I2C peer models; the other protocol tests define their peers in their own files.
-- `test/test_*.py`: cocotb tests; [test/tb.v](test/tb.v) models pull-ups and open-drain peers.
-- [docs/info.md](docs/info.md): project datasheet source.
-- [docs/area-log.md](docs/area-log.md): area and timing measurements.
+Bidirectional pins `P0`-`P7` support push-pull and open-drain drive and are released after reset.
+`P8`-`P9` are input-only; `P10`-`P12` are output-only and drive zero after reset.
+Provide external pull-ups for lines that must idle high, and use the electrical interfaces listed in [the protocol guide](docs/protocols.md#external-hardware).
 
-`make test LATCH=yes` runs the same suite on the latch storage build.
+## CI and physical builds
 
-When adding RTL files, list each one in `info.yaml` and `test/Makefile`, and include it in the root Makefile's lint command.
-Update the pin descriptions and datasheet when the emulator interface is defined.
-Replace the author handle in `info.yaml` with your preferred attribution before submission.
+Normal pushes run RTL verification, the C model checks, and datasheet generation.
+Publishing a GitHub release or prerelease runs all physical CI:
 
-## RTL to GDS
+- `gds`: CMOS5L hardening, precheck, functional gate-level tests, and the layout viewer.
+- `timing`: setup and hold estimates at three corners after global routing.
 
-The existing `gds` GitHub Actions workflow uses `TinyTapeout/tt-gds-action@ihp-cmos5l` and `pdk: ihp-sg13cmos5l`.
-After pushing your changes, it runs hardening, precheck, and gate-level simulation, and uploads the layout and build logs.
-Use those results to check mapped area, routing, and timing early in development.
-The `test` workflow runs RTL simulation and lint, while `docs` builds the project datasheet.
+Branch pushes, tag pushes, and draft releases do not start these physical workflows.
+The timing estimate helps compare changes; final operating limits require detailed-route reports.
+[The release guide](docs/releasing.md) describes how to select a source commit, start a build, and review its artifacts.
 
-Enable GitHub Pages with **Source: GitHub Actions** in the repository settings to publish the layout viewer.
-See the [Tiny Tapeout Pages instructions](https://tinytapeout.com/faq/#my-github-action-is-failing-on-the-pages-part).
+Enable GitHub Pages with **Source: GitHub Actions** to publish the layout viewer, and allow the release tags in the `github-pages` environment's deployment rules if that environment restricts refs.
+The physical workflows use `TinyTapeout/tt-gds-action@ihp-cmos5l` and the CMOS5L PDK.
+Local hardening requires Docker, LibreLane, and the corresponding PDK installation; use the [CMOS5L action](https://github.com/TinyTapeout/tt-gds-action/tree/ihp-cmos5l) as the configuration reference.
 
-The dev container is configured for the CMOS5L PDK and support-tools branch.
-Full local hardening requires a running Docker engine, LibreLane, and the CMOS5L PDK installation used by the [CMOS5L action](https://github.com/TinyTapeout/tt-gds-action/tree/ihp-cmos5l).
-The [general local-hardening guide](https://tinytapeout.com/guides/local-hardening/) still shows `ihp-sg13g2` for IHP; use the competition's CMOS5L configuration instead.
+## Repository guide
 
-## First milestones
+| Path | Contents |
+| --- | --- |
+| [CONTEXT.md](CONTEXT.md) | Project goals, constraints, and terminology |
+| [docs/spec.md](docs/spec.md) | Authoritative interface, instruction, and timing definitions |
+| [docs/protocols.md](docs/protocols.md) | Protocol demonstrations, limits, and wiring requirements |
+| [docs/roadmap.md](docs/roadmap.md) | Completed milestones and remaining acceptance criteria |
+| [docs/area-log.md](docs/area-log.md) | Source-linked synthesis and routed measurements |
+| [docs/info.md](docs/info.md) | Tiny Tapeout datasheet source |
+| [src/](src/) | Top-level wrapper and synthesizable RTL blocks |
+| [info.yaml](info.yaml), [src/config.json](src/config.json) | Metadata, pin descriptions, source list, and physical settings |
+| [programs/](programs/), [tools/pe/](tools/pe/) | Firmware, assembler, register definitions, decoder tables, and Host helpers |
+| [test/](test/README.md), [formal/](formal/README.md) | Pin-level simulations, reference comparisons, and formal properties |
+| [model/](model/README.md) | Earlier four-engine C architecture exploration at 40 MHz |
 
-Read the [competition roadmap](docs/roadmap.md) for the goal, first UART task, architecture questions, phases, completion criteria, and suggested timeline.
+The C model has a different ISA, Host interface, and resource budget from the two-engine RTL.
+The current RTL reference model is [tools/pe/model.py](tools/pe/model.py).
 
-1. Run the CMOS5L GDS build and record real area, routing and timing in the area log.
-2. Decide on the hardware changes suggested in [docs/protocols.md](docs/protocols.md): a wait with timeout and an ISR count source.
-3. Extend the verification: an independent instruction-level model with randomized program comparison.
-4. Decide between flip-flop and latch storage from gate-level results on CMOS5L.
-
-Fill out the update sign-up form linked in the [competition announcement](https://blog.janestreet.com/protocol-emulator-asic-competition/) to receive deadline and submission updates.
+When changing RTL, define externally visible behavior first and verify it through the top-level pins.
+Register new RTL files in `info.yaml`, `test/Makefile`, and the root Makefile's source list.
+Run `make check`, keep the specification and datasheet consistent, and record physical measurements against the exact build commit.

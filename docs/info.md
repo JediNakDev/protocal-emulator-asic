@@ -17,7 +17,9 @@ General building blocks extend what the programs can do, without any protocol-sp
 - Pattern waits and indexed jumps help programs react quickly to multi-pin conditions and decode symbols.
 
 Together these make the chip a cycle-exact recorder and signal generator for protocols it has no program for.
-Waveform capture and replay programs record every edge on a pin with 20 ns resolution and play it back exactly, or edited by the Host for fault injection (see [protocol programs](protocols.md)).
+Waveform capture and replay programs timestamp pin edges with one-cycle resolution (20 ns at the 50 MHz target) and replay them, optionally edited by the Host for fault injection.
+Capture requires an 8-cycle input filter and sufficient Host bandwidth; loss flags identify overwritten edges or dropped timestamp words.
+See [protocol programs](protocols.md#waveform-capture-and-replay) for minimum pulse widths, buffering, capture rates, and replay requirements.
 
 The Host reaches every register through an SPI-style port, 1 bit wide after reset and 4 bits wide after one register write.
 
@@ -27,7 +29,12 @@ Run `make setup` once, then `make check` from the repository root.
 The cocotb tests drive only the top-level pins: they load programs through the Host port and check protocol behavior with independent peer models.
 They cover the Host port, instruction timing, the general building blocks, and protocol programs for UART, SPI, I2C, JTAG, SWD, PS/2, CAN, low-speed USB and 10BASE-T.
 [Protocol programs](protocols.md) lists what each program does, what was verified and the limits found.
-A reference model written from the specification runs random programs alongside the chip and must agree on every pin in every cycle, and `make formal` proves the fetch stage, buffer occupancy and reset outputs.
+A reference model written from the specification runs random programs alongside the chip and must agree on every pin in every cycle.
+Selected formal checks cover fetch consistency, buffer occupancy, and safe reset outputs; [the formal guide](../formal/README.md) defines their scope.
+
+Publishing a release or prerelease runs CMOS5L hardening, precheck, functional gate-level tests, and a separate global-route timing estimate.
+Recorded routed builds meet 50 MHz at the typical corner but fail setup timing at the slow corner.
+The latest source still needs routed confirmation; [the area log](area-log.md) records the exact source for each measurement.
 
 On the demo board, the RP2040 acts as Host:
 
