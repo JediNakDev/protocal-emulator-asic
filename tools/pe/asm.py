@@ -13,6 +13,10 @@ Syntax follows RP2040 PIO assembly where the instruction sets overlap:
         jmp x-- bitloop [6]
     .wrap
 
+Additions beyond PIO: `wait <pol> <gpio|pin|flag> <n> timeout` counts its
+checks down in X and leaves X at 0 only if it timed out, and
+`mov <dest>, isrcnt` / `mov <dest>, osrcnt` read the shift counts.
+
 Comments start with ';' or '//'. Numbers may be decimal, 0x or 0b.
 `.define NAME value` creates a constant.
 """
@@ -32,6 +36,8 @@ OUT_DEST = {
 }
 MOV_DEST = {"pins": 0, "x": 1, "y": 2, "pindirs": 3, "exec": 4, "pc": 5, "isr": 6, "osr": 7}
 MOV_SRC = {"pins": 0, "x": 1, "y": 2, "null": 3, "status": 4, "isr": 5, "osr": 6, "ram": 7}
+MOV_COUNT = {"isrcnt": 0, "osrcnt": 1}  # sources of the count operation (3)
+WAIT_INDEX_LIMIT = {"gpio": 16, "pin": 16, "flag": 8}
 SET_DEST = {"pins": 0, "x": 1, "y": 2, "pindirs": 4}
 
 MEM_SIZE = 64
@@ -204,14 +210,28 @@ def _encode(line, labels, defines, side_count, side_opt):
         base = ((c >> 2) << 13) | ((c & 3) << 6) | (addr & 0x3F)
     elif op == "wait":
         toks = args.split()
+        timed = bool(toks) and toks[-1].lower() == "timeout"
+        if timed:
+            toks = toks[:-1]
         if len(toks) < 2:
             raise AsmError(f"bad wait: {line}")
         pol = _num(toks[0], defines)
         src = toks[1].lower()
-        if src not in WAIT_SRC:
-            raise AsmError(f"bad wait source {src}")
-        idx = 0 if src == "pattern" else _num(toks[2], defines)
-        base = (2 << 13) | ((pol & 1) << 7) | (WAIT_SRC[src] << 5) | (idx & 0x1F)
+        if src not in WAIT_SRC or pol not in (0, 1):
+            raise AsmError(f"bad wait: {line}")
+        if src == "pattern":
+            if len(toks) != 2:
+                raise AsmError(f"bad wait: {line}")
+            if timed:
+                raise AsmError("a pattern wait cannot time out: the pattern uses X")
+            idx = 0
+        else:
+            if len(toks) != 3:
+                raise AsmError(f"bad wait: {line}")
+            idx = _num(toks[2], defines)
+            if not 0 <= idx < WAIT_INDEX_LIMIT[src]:
+                raise AsmError(f"wait {src} index {idx} out of range")
+        base = (2 << 13) | (pol << 7) | (WAIT_SRC[src] << 5) | (int(timed) << 4) | idx
     elif op == "in":
         src, n = a[0].lower(), _num(a[1], defines)
         if src not in IN_SRC or not 1 <= n <= 16:
@@ -244,9 +264,13 @@ def _encode(line, labels, defines, side_count, side_opt):
             opbits, src = 1, src[1:]
         elif src.startswith("::"):
             opbits, src = 2, src[2:]
-        if dst not in MOV_DEST or src not in MOV_SRC:
+        if dst in MOV_DEST and opbits == 0 and src in MOV_COUNT:
+            opbits, srcbits = 3, MOV_COUNT[src]
+        elif dst in MOV_DEST and src in MOV_SRC:
+            srcbits = MOV_SRC[src]
+        else:
             raise AsmError(f"bad mov: {line}")
-        base = (6 << 13) | (MOV_DEST[dst] << 5) | (opbits << 3) | MOV_SRC[src]
+        base = (6 << 13) | (MOV_DEST[dst] << 5) | (opbits << 3) | srcbits
     elif op == "set":
         dst, v = a[0].lower(), _num(a[1], defines)
         if dst not in SET_DEST or not 0 <= v <= 31:

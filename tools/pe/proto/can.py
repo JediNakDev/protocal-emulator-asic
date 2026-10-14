@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Host-side CAN 2.0A software for programs/can_tx.pasm and can_rx.pasm."""
 
+from . import records
+
 DOMINANT, RECESSIVE, ACK_SLOT, QUIET = 0, 1, 2, 3
 
 
@@ -51,25 +53,14 @@ def tx_words(ident, data):
 
 
 def split_records(words):
-    """Split 15-bit can_rx data words, terminated by the 0xFFFF separator."""
-    records, cur = [], []
-    for w in words:
-        if w == 0xFFFF:
-            bits = [(x >> (14 - i)) & 1 for x in cur for i in range(15)]
-            while bits and bits[-1] == 0:
-                bits.pop()
-            if bits:
-                bits.pop()  # the end marker
-            records.append(bits)
-            cur = []
-        else:
-            cur.append(w)
-    return records, cur
+    """can_rx receive words -> (records of destuffed bits, words of an
+    unfinished record). See tools/pe/proto/records.py."""
+    return records.split(words)
 
 
 def parse(bits):
     """Destuffed record -> (id, data, crc_ok), or None if too short."""
-    if len(bits) < 19 or bits[0] != 0:
+    if bits is None or len(bits) < 19 or bits[0] != 0:
         return None
     ident = sum(bits[1 + i] << (10 - i) for i in range(11))
     dlc = min(sum(bits[15 + i] << (3 - i) for i in range(4)), 8)

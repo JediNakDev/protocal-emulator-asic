@@ -132,7 +132,7 @@ Multi-byte registers are little-endian.
 | Address | Name | Access | Description |
 | --- | --- | --- | --- |
 | 0x00 | `ID` | R | 0x50 |
-| 0x01 | `VERSION` | R | 0x01 |
+| 0x01 | `VERSION` | R | 0x02: instruction set with timed waits and count reads |
 | 0x02 | `CTRL` | RW | Bit 0 enables engine 0, bit 1 enables engine 1 |
 | 0x03 | `CMD` | W | Write 1 to pulse: bit 0 restarts engine 0, bit 1 restarts engine 1, bit 2 steps engine 0, bit 3 steps engine 1, bit 4 clears engine 0 buffers, bit 5 clears engine 1 buffers, bit 6 resets both clock dividers |
 | 0x04 | `FLAGS` | RW | Read the 8 coordination flags; write 1 to clear |
@@ -277,7 +277,7 @@ On each tick:
 1. If the delay counter is not zero, it decrements, and nothing else happens.
 2. Otherwise the engine **issues** an instruction: the exec slot if full, otherwise the instruction at PC.
 3. The instruction either completes or **stalls**.
-   A stalled instruction has no effect except side-set, and issues again on the next tick.
+   A stalled instruction has no effect except side-set, the flag that a first `irq wait` sets, and the X decrement of a timed `wait`; it issues again on the next tick.
 4. On completion, PC moves to the jump target if the instruction jumped.
    Otherwise, an instruction from memory advances PC: to `WRAP_BOTTOM` if PC equals `WRAP_TOP`, else to PC + 1.
    An instruction from the exec slot that does not jump leaves PC unchanged.
@@ -303,7 +303,7 @@ Bits 12:8 are the side-set and delay field in every instruction.
 | Bits 15:13 | Instruction | Bits 7:0 |
 | --- | --- | --- |
 | 00x | `jmp` | Bit 13 and bits 7:6 condition, bits 5:0 address |
-| 010 | `wait` | Bit 7 polarity, bits 6:5 source, bits 4:0 index |
+| 010 | `wait` | Bit 7 polarity, bits 6:5 source, bit 4 timed, bits 3:0 index |
 | 011 | `in` | Bits 7:4 source, bits 3:0 bit count (0 means 16) |
 | 100 | `out` | Bits 7:4 destination, bits 3:0 bit count (0 means 16) |
 | 101 | `push`, `pull`, `irq` | Bits 7:6: 00 `push`, 01 `pull`, 10 `irq`, 11 reserved |
@@ -349,8 +349,29 @@ Bit 0 of the data goes to the base pin.
 | --- | --- | --- |
 | 0 | `gpio n` | Pin `n` (absolute, 0-15) equals the polarity |
 | 1 | `pin n` | Pin `in_base + n` (modulo 16) equals the polarity |
-| 2 | `flag n` | Flag `n` equals the polarity; waiting for 1 clears the flag on completion |
+| 2 | `flag n` | Flag `n` (bits 2:0; bit 3 is ignored) equals the polarity; waiting for 1 clears the flag on completion |
 | 3 | `pattern` | Polarity 1: `(pins & Y) == X`. Polarity 0: they differ (G4) |
+
+#### Timed wait
+
+Bit 4 makes a `gpio`, `pin` or `flag` wait **timed** (`wait 1 gpio 3 timeout`), with X as a count of the checks it may still make.
+Each issue of a timed wait is one check:
+
+1. If X is 0, the wait completes: it has timed out.
+2. Otherwise, if the condition holds, the wait completes and X is unchanged.
+   A satisfied `flag` wait for 1 clears the flag, as without a timeout.
+3. Otherwise X decrements.
+   If X is now 0 the wait completes, timed out; otherwise the wait stalls and checks again on the next tick.
+
+After a timed wait, X is 0 if and only if it timed out, so `jmp !x` selects the timeout path.
+With X = N > 0 at the first check, the wait makes at most N checks, one per tick, and completes on the first check that finds the condition; if that is check k, X becomes N - k + 1.
+The condition is sampled exactly as by an untimed wait, including the 2-cycle input latency of synchronized pins.
+Side-set applies on every check; the delay field applies once, after completion, whatever the outcome.
+X carries over between timed waits, so they can reuse a remaining failed-check budget.
+Successful checks, delays and intervening instructions do not decrement X; this is not a shared wall-clock deadline across multiple waits.
+Once X reaches 0, each further timed wait completes at its first check.
+A timed wait on a disabled engine's exec slot checks once per cycle, like any forced instruction that stalls.
+Timed `pattern` waits are reserved, since the pattern uses X; they execute as `nop`.
 
 ### `in`
 
@@ -397,8 +418,13 @@ If one source sets a flag and another clears it in the same cycle, the set wins.
 
 Destinations: 0 `pins`, 1 `x`, 2 `y`, 3 `pindirs`, 4 `exec`, 5 `pc`, 6 `isr` (count becomes 0), 7 `osr` (count becomes 0, meaning full).
 Sources: 0 `pins`, 1 `x`, 2 `y`, 3 `null`, 4 `status`, 5 `isr`, 6 `osr`, 7 `ram` (entry `Y[2:0]`).
-Operations: 0 none, 1 invert (`~`), 2 bit-reverse (`::`), 3 none.
+Operations: 0 none, 1 invert (`~`), 2 bit-reverse (`::`), 3 count.
 `status` is all ones if the selected queue's level is below `N`, else all zeros.
+
+Operation 3 reads a count instead of the source register: source 0 is the ISR count (`mov x, isrcnt`, 0-16) and source 1 the OSR count (`mov x, osrcnt`, 0-16, where 16 means empty); sources 2-7 read 0 and are reserved for further counts.
+The value is the count at the start of the cycle, before any G2 emission in the same cycle.
+Reading a count does not change it.
+A program uses `isrcnt` to learn how many bits of a partial word the ISR holds before pushing it, for example to close a record with its exact length (see [record framing](protocols.md#record-framing)).
 
 ### `set`
 

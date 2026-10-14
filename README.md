@@ -16,6 +16,7 @@ Recorded CMOS5L builds passed hardening, precheck, and functional gate-level sim
 Those builds met the 50 MHz target at the typical corner but failed setup timing at the slow corner.
 The latest measured RTL (`17995b3`) has +4.05 ns typical-corner setup slack and -4.14 ns slow-corner setup slack, so all-corner timing closure remains open.
 [The area log](docs/area-log.md) ties each measurement to its source state; [the roadmap](docs/roadmap.md) defines the remaining work.
+[The issue #14 design review](docs/design-review.md) records protocol gaps, shared timing and framing interfaces, measured resource needs, and the experiments required before freezing the architecture.
 
 | Setting | Value |
 | --- | --- |
@@ -52,6 +53,7 @@ Formal checks require `yosys-smtbmc` and Z3; CI uses a current OSS CAD Suite and
 | `make formal` | Check fetch consistency, queue occupancy, and safe reset outputs |
 | `make test-tooling` | Test the verification commands' failure handling |
 | `make model` | Build and test the earlier C architecture model |
+| `python tools/measure.py` | Report program sizes and source hashes; add `--liberty /path/to/library.lib` for both storage variants' mapped area estimates |
 | `make clean` | Remove simulation, model, and formal build outputs |
 
 Simulation writes `test/tb.fst` and `test/results.xml`.

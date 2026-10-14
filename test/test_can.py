@@ -255,13 +255,32 @@ async def test_can_arbitration(dut):
     assert node.received == [(0x400, b"\x01", True)]
 
 
+# The second frame has the longest stretches between recessive-to-dominant
+# edges that stuffing allows: eight times five dominant then five recessive
+# bits, ten bits without an edge to resynchronize on.
+OFFSET_PAYLOADS = [
+    (0x555, bytes([0x0F, 0xF0, 0x3C, 0xC3, 0x00, 0xFF, 0x81, 0x7E])),
+    (0x000, bytes([0x3C] * 8)),
+]
+
+
+async def receive_with_offset(dut, bit):
+    node = CanNode(bit=bit)
+    chip = await setup(dut, node)
+    for ident, data in OFFSET_PAYLOADS:
+        node.pending.append((ident, data, False))
+    frames = await receive_frames(chip, len(OFFSET_PAYLOADS))
+    assert frames == [(i, d, True) for i, d in OFFSET_PAYLOADS], frames
+
+
 @cocotb.test()
 async def test_can_receive_clock_offset(dut):
-    """Bit timing is synchronized only at start of frame, so the clock
-    offset limit is small: 0.1% across a full 8-byte frame still works."""
-    node = CanNode(bit=50.05)
-    chip = await setup(dut, node)
-    data = bytes([0x0F, 0xF0, 0x3C, 0xC3, 0x00, 0xFF, 0x81, 0x7E])
-    node.pending.append((0x555, data, False))
-    frames = await receive_frames(chip, 1)
-    assert frames[0] == (0x555, data, True)
+    """Resynchronization on every recessive-to-dominant edge: the transmitter
+    1.5% slow (CAN allows up to 1.58% between two nodes)."""
+    await receive_with_offset(dut, 50 * 1.015)
+
+
+@cocotb.test()
+async def test_can_receive_clock_offset_fast(dut):
+    """...and 1.5% fast."""
+    await receive_with_offset(dut, 50 * 0.985)

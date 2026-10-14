@@ -245,6 +245,7 @@ class Engine:
             stall = False
             jump = None
             exec_new = None
+            timed_x = None  # X after a failing check of a timed wait
 
             in_steps = op == IN and one_bit and self.lfsr_feed & 2
             out_steps = op == OUT and one_bit and self.lfsr_feed & 1 and f != OUT_LFSR
@@ -278,6 +279,7 @@ class Engine:
             elif op == WAIT:
                 pol = _bit(instr, 7)
                 src = (instr >> 5) & 3
+                timed = bool(_bit(instr, 4))
                 if src == 0:
                     v = _bit(pins, instr & 15)
                 elif src == 1:
@@ -286,8 +288,19 @@ class Engine:
                     v = _bit(chip.flags, instr & 7)
                 else:
                     v = int((pins & self.y) == self.x)
-                if v != pol:
-                    stall = True
+                if timed and src == 3:
+                    pass  # reserved: a timed pattern wait is a nop
+                elif timed and self.x == 0:
+                    pass  # timed out: completes without checking
+                elif v != pol:
+                    if timed:
+                        # Each failing check uses up one; the check that
+                        # reaches 0 completes. The decrement survives a stall.
+                        timed_x = (self.x - 1) & M16
+                        x = timed_x
+                        stall = timed_x != 0
+                    else:
+                        stall = True
                 elif src == 2 and pol:
                     e["flag_clr"] |= 1 << (instr & 7)
             elif op == IN:
@@ -391,7 +404,11 @@ class Engine:
                 else:
                     src = {0: pins_rot, 1: self.x, 2: self.y, 3: 0, 5: self.isr, 6: self.osr, 7: b.mem[self.y & 7]}[srcsel]
                 o = (instr >> 3) & 3
-                v = (~src & M16) if o == 1 else _rev16(src) if o == 2 else src
+                if o == 3:
+                    # Count operation: the source field picks a count instead.
+                    v = {0: self.isr_count, 1: self.osr_count}.get(srcsel, 0)
+                else:
+                    v = (~src & M16) if o == 1 else _rev16(src) if o == 2 else src
                 dst = (instr >> 5) & 7
                 if dst == 0:
                     pin_out = write_range(pin_out, self.out_base, _count(self.out_count, 16), v)
@@ -424,11 +441,14 @@ class Engine:
             side_en, side_val, dly = self.side_fields((instr >> 8) & 31)
             n["stalled"] = stall
             if stall:
-                # A stalled instruction has no effect except side-set, and the
-                # flag that a first `irq wait` sets before waiting.
+                # A stalled instruction has no effect except side-set, the
+                # flag that a first `irq wait` sets before waiting, and the X
+                # decrement of a timed wait.
                 x, y, isr, isr_count, osr, osr_count, lfsr = self.x, self.y, self.isr, self.isr_count, self.osr, self.osr_count, self.lfsr
                 pin_out, pin_dir = self.pin_out, self.pin_dir
                 tx_pop, rx_push, ram_write = False, None, None
+                if timed_x is not None:
+                    x = timed_x
             if side_en:
                 if self.side_dirs:
                     pin_dir = write_range(pin_dir, self.side_base, self.side_count, side_val)

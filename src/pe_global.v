@@ -45,7 +45,7 @@ module pe_global (
     output reg  [31:0] counter
 );
 
-  localparam [7:0] ID = 8'h50, VERSION = 8'h01;
+  localparam [7:0] ID = 8'h50, VERSION = 8'h02;
 
   wire wr = bus_we & (bus_addr[6:5] == 2'b00);
 

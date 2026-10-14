@@ -40,9 +40,11 @@ class UsbDevice:
     answers SETUP+DATA0 with ACK and IN with DATA1. Its bit time may differ
     from the host's."""
 
-    def __init__(self, chip, bit=32.0):
+    def __init__(self, chip, bit=32.0, reply_after=1.5):
         self.chip = chip
         self.bit = bit
+        self.reply_after = reply_after  # bit times from the end of SE0 to SYNC
+        self.mute_in = False            # ignore IN tokens, as if absent
         self.packets = []    # (pid, payload, ok) received from the host
         self.setup = None
         self.acks = 0
@@ -102,7 +104,10 @@ class UsbDevice:
         return levels + [(0, 0), (0, 0), (0, 1)]
 
     def _reply(self, pid, payload=None):
-        self.next_tx = (self.now + round(3 * self.bit), self._levels_for(pid, payload))
+        # The device decides at its sample of the first SE0 bit, half a bit
+        # into the two-bit SE0; the J after it starts 1.5 bits later.
+        self.next_tx = (self.now + round((1.5 + self.reply_after) * self.bit),
+                        self._levels_for(pid, payload))
 
     def _handle(self, pkt):
         self.packets.append(pkt)
@@ -115,7 +120,7 @@ class UsbDevice:
             self.expect_setup_data = False
             self.setup = payload
             self._reply(usb.PID_ACK)
-        elif pid == usb.PID_IN:
+        elif pid == usb.PID_IN and not self.mute_in:
             self._reply(usb.PID_DATA1, DESCRIPTOR)
         elif pid == usb.PID_ACK:
             self.acks += 1
@@ -163,7 +168,7 @@ class UsbDevice:
                 next_sample = self.now + round(self.bit)
 
 
-async def setup(dut, device_bit):
+async def setup(dut, device_bit, reply_after=1.5):
     chip = Chip(dut, clk_ps=CLK_PS)
     await chip.start()
     await chip.set_quad()
@@ -174,7 +179,7 @@ async def setup(dut, device_bit):
     await chip.load(rx, len(host))
     await chip.setup_engine(0, host, 0, clkdiv=3, shiftctrl=regs.AUTOPULL | regs.OUT_RIGHT, out_base=DP,
                             out_count=2, set_base=DP, set_count=2, in_base=DP, side_base=RX_EN)
-    await chip.setup_engine(1, rx, len(host), clkdiv=7,
+    await chip.setup_engine(1, rx, len(host), clkdiv=7, thresh=15,
                             shiftctrl=regs.AUTOPUSH | regs.fifo_mode(regs.FIFO_JOIN_RX))
     await chip.write(regs.G2_ADDR, 0)
     await chip.write(regs.G2_DATA, g2lib.usb_nrzi_dpll())
@@ -185,7 +190,7 @@ async def setup(dut, device_bit):
     for p in (DP, DM):
         await chip.pincfg(p, regs.DRIVE_PUSH_PULL)
     await chip.pincfg(RX_EN, regs.DRIVE_ALWAYS)
-    dev = UsbDevice(chip, bit=device_bit)
+    dev = UsbDevice(chip, bit=device_bit, reply_after=reply_after)
     cocotb.start_soon(dev.run(dut.clk))
     contention = []
 
@@ -200,6 +205,7 @@ async def setup(dut, device_bit):
 
 
 async def replies(chip, n, timeout=400000):
+    """The next n reply records, parsed; None for a reply that did not come."""
     words, waited = [], 0
     while True:
         _, rx = await chip.levels(1)
@@ -251,3 +257,49 @@ async def test_usb_device_clock_fast(dut):
 @cocotb.test()
 async def test_usb_device_clock_slow(dut):
     await get_descriptor(dut, 32.0 * 1.015)
+
+
+async def in_transaction(chip):
+    tx = usb.command(usb.token(usb.PID_IN, 0, 0), True)
+    await chip.stream(0, tx, 0)
+    (reply,) = await replies(chip, 1)
+    return reply
+
+
+@cocotb.test()
+async def test_usb_missing_reply_is_bounded(dut):
+    """A device that does not answer: the program gives up at its deadline,
+    reports a record without a SYNC, and runs the next command without any
+    Host intervention."""
+    chip, dev, contention = await setup(dut, 32.0)
+    dev.mute_in = True
+    start = dev.now
+    assert await in_transaction(chip) is None
+    # Bounded: the IN token, the 17-bit deadline and the Host's polling.
+    assert dev.now - start < 80 * 32, dev.now - start
+    # Not stuck: the next transaction runs and succeeds.
+    dev.mute_in = False
+    assert await in_transaction(chip) == (usb.PID_DATA1, DESCRIPTOR, True)
+    assert (await chip.status()) & 0x10, "engine 0 waits for the next command"
+    assert not contention, f"D+/D- driven by both sides at cycles {contention[:5]}"
+
+
+async def reply_at(dut, reply_after):
+    chip, dev, contention = await setup(dut, 32.0, reply_after=reply_after)
+    reply = await in_transaction(chip)
+    await chip.cycles(40 * 32)  # let a late reply finish
+    assert not contention, f"D+/D- driven by both sides at cycles {contention[:5]}"
+    return reply
+
+
+@cocotb.test()
+async def test_usb_reply_inside_deadline(dut):
+    """USB 2.0 7.1.19.1: the host waits at least 16 bit times for a reply.
+    A reply starting 16.75 bit times after the end of SE0 is received."""
+    assert await reply_at(dut, 16.75) == (usb.PID_DATA1, DESCRIPTOR, True)
+
+
+@cocotb.test()
+async def test_usb_reply_after_deadline(dut):
+    """...and at most 18: a reply starting at 17.25 bit times is missing."""
+    assert await reply_at(dut, 17.25) is None

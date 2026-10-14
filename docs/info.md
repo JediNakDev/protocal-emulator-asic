@@ -7,6 +7,8 @@ The full behavior is defined in [the specification](spec.md).
 Each engine reads and drives 13 protocol pins with cycle-exact timing.
 It has PIO-style instructions (`jmp`, `wait`, `in`, `out`, `push`, `pull`, `irq`, `mov`, `set`), side-set and delay, shift registers with automatic refill and drain, and an integer clock divider.
 Each engine owns 8 words of buffering that can act as transmit queue, receive queue or RAM.
+Instruction set version 2 adds waits with deadlines and shift-count reads.
+Receive programs use these general operations for bounded USB replies, CAN resynchronization and exact message boundaries; [the design review](design-review.md) tracks the remaining mandatory protocol gaps.
 
 General building blocks extend what the programs can do, without any protocol-specific hardware:
 

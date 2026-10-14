@@ -40,7 +40,14 @@ class Chip:
 
     # ------------------------------------------------------------- basics
     async def start(self):
-        cocotb.start_soon(Clock(self.dut.clk, self.clk_ps, unit="ps").start())
+        # One clock driver per test: a test that resets the chip again keeps
+        # it, or replaces it when the period changes.
+        running = getattr(self.dut, "_pe_clock", None)
+        if running is None or running[0] != self.clk_ps or running[1].done():
+            if running is not None:
+                running[1].cancel()
+            task = cocotb.start_soon(Clock(self.dut.clk, self.clk_ps, unit="ps").start())
+            self.dut._pe_clock = (self.clk_ps, task)
         self.dut.ena.value = 1
         self.dut.ext_oe.value = 0
         self.dut.ext_out.value = 0

@@ -393,9 +393,12 @@ module pe_engine #(
       3'd7: mov_src = ram_rdata_e;
       default: mov_src = 16'h0000;
     endcase
+    // Operation 3 reads a count instead: source 0 the ISR count, 1 the OSR
+    // count, others 0.
     case (instr[4:3])
       2'd1: mov_val = ~mov_src;
       2'd2: mov_val = rev16(mov_src);
+      2'd3: mov_val = (instr[2:1] != 2'b00) ? 16'h0000 : {11'd0, instr[0] ? osr_cnt : isr_cnt};
       default: mov_val = mov_src;
     endcase
   end
@@ -543,8 +546,19 @@ module pe_engine #(
               2'd2: wcond = flags[instr[2:0]];
               default: wcond = pat_match;
             endcase
-            if (wcond != instr[7]) stall = 1'b1;
-            else if (instr[6:5] == 2'd2 && instr[7]) flag_clr[instr[2:0]] = 1'b1;
+            // Bit 4 makes the wait timed, with X counting the checks left;
+            // X is 0 afterwards only if it timed out. A timed pattern wait
+            // is reserved, since the pattern uses X.
+            if (instr[4] && instr[6:5] == 2'd3) begin
+              // reserved: nop
+            end else if (instr[4] && x == 16'd0) begin
+              // timed out before this check
+            end else if (wcond != instr[7]) begin
+              if (instr[4]) n_x = x - 16'd1;
+              if (!instr[4] || x != 16'd1) stall = 1'b1;
+            end else if (instr[6:5] == 2'd2 && instr[7]) begin
+              flag_clr[instr[2:0]] = 1'b1;
+            end
           end
 
           OP_IN: begin

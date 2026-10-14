@@ -43,11 +43,14 @@ def random_instr(rng, toggling):
     blocking forms are rare, since nobody feeds or drains the queues, and
     most waits are on pins that the board toggles."""
     sd = 0 if rng.random() < 0.5 else rng.getrandbits(5)
-    op = rng.choices(range(8), [9, 9, 2, 12, 14, 8, 18, 22])[0]
+    op = rng.choices(range(8), [9, 9, 3, 12, 14, 8, 18, 22])[0]
     lo = rng.getrandbits(8)
     if op == 2:
         src = rng.choices(range(4), [6, 2, 1, 1])[0]
         lo = (lo & 0x9F) | (src << 5)
+        if src != 3 and rng.random() < 0.5:  # timed, with a short count
+            lo |= 0x10
+            sd = rng.choice([sd, 0])
         if src == 0 and toggling:
             lo = (lo & 0xE0) | rng.choice(toggling)
     elif op == 4 and lo >> 4 == 9 and rng.random() < 0.8:  # `out g2` blocks once the feed fills
@@ -74,6 +77,11 @@ def random_setup(rng):
         s["pincfg"].append(owner | (drive << 2) | (rng.getrandbits(2) << 4) | (flt << 6))
     toggling = [i for i in range(8) if (s["pincfg"][i] >> 2) & 3 in (0, 2)] + [8, 9]
     s["imem"] = [random_instr(rng, toggling) for _ in range(64)]
+    # Load a short count before most timed waits, so they also time out.
+    for i in range(1, 64):
+        w = s["imem"][i]
+        if w >> 13 == 2 and w & 0x10 and rng.random() < 0.7:
+            s["imem"][i - 1] = 0xE000 | (1 << 5) | rng.randrange(32)  # set x, n
     # Instruction memory writes while the engines run: (engine whose PC picks
     # the address, offset from that PC or None for a random address, word).
     s["imem_writes"] = [(rng.getrandbits(1), rng.choice([0, 0, 1, 1, 2, None]), random_instr(rng, toggling))
@@ -92,7 +100,9 @@ def random_setup(rng):
         setpin = base() | (rng.getrandbits(3) << 4)
         sidepin = base() | (rng.choices(range(4), [1, 3, 2, 2])[0] << 4) | (rng.getrandbits(2) << 6)
         e = {
-            "x": rng.getrandbits(16), "y": rng.getrandbits(16), "start": rng.randrange(64),
+            # Small X values let timed waits run out within the run.
+            "x": rng.getrandbits(16) if rng.random() < 0.3 else rng.randrange(48),
+            "y": rng.getrandbits(16), "start": rng.randrange(64),
             "regs": [rng.choice([0, 0, 0, 1, 2, 3]), 0, rng.randrange(64), rng.randrange(64)]
                     + [shiftctrl(rng), rng.getrandbits(8), outpin, setpin,
                        rng.getrandbits(8), sidepin, rng.getrandbits(7), rng.getrandbits(5),

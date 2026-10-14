@@ -17,6 +17,7 @@ class DebugPortModel:
 
     def __init__(self, chip):
         self.chip = chip
+        self.acks = []  # ACKs to give the next valid requests instead of OK
         self.state = "reset_wait"
         self.ones = 0
         self.ctrl_stat = 0
@@ -38,7 +39,8 @@ class DebugPortModel:
             self.state = "lockout"
             return
         self.apndp, self.rnw, self.addr = apndp, rnw, addr
-        self.ack = 0b001
+        self.ack = self.acks.pop(0) if self.acks else swd.ACK_OK
+        self.log.append(("request", req, self.ack))
         self.edge = 8
         self.state = "transfer"
         if rnw:
@@ -49,6 +51,11 @@ class DebugPortModel:
         e = self.edge
         if 9 <= e <= 11:
             self._drive((self.ack >> (e - 9)) & 1)
+        elif self.ack != swd.ACK_OK:
+            # WAIT or FAULT (ORUNDETECT = 0): no data phase; after a
+            # turnaround the next request may start.
+            self._release()
+            self.state = "turnaround"
         elif self.rnw:
             if 12 <= e <= 43:
                 self._drive((self.rdata >> (e - 12)) & 1)
@@ -114,10 +121,11 @@ async def setup(dut):
     await chip.set_quad()
     chip.pull_up(1 << SWDIO)
     prog = await chip.load_program("swd")
-    await chip.setup_engine(0, prog, shiftctrl=regs.OUT_RIGHT | regs.IN_RIGHT,
-                            out_base=SWDIO, in_base=SWDIO, side_base=SWCLK)
+    await chip.setup_engine(0, prog, shiftctrl=regs.OUT_RIGHT | regs.IN_RIGHT | regs.AUTOPULL
+                            | regs.AUTOPUSH, out_base=SWDIO, in_base=SWDIO, side_base=SWCLK)
     await chip.ereg(0, regs.SETPIN, SWCLK | (1 << 4))
-    await chip.force_asm(0, "set pindirs, 1 side 0", side_count=1, side_opt=True)
+    await chip.force_asm(0, "set pindirs, 1 side 0", side_count=1, side_opt=True)  # SWCLK out
+    await chip.ereg(0, regs.SETPIN, SWDIO | (1 << 4))  # the program turns SWDIO around
     await chip.pincfg(SWDIO, regs.DRIVE_PUSH_PULL)
     await chip.pincfg(SWCLK, regs.DRIVE_PUSH_PULL)
     dp = DebugPortModel(chip)
@@ -134,6 +142,13 @@ async def setup(dut):
     return chip, dp, contention
 
 
+async def run(chip, b, n_rx):
+    rx = await chip.stream(0, b.tx, n_rx)
+    res, used = b.decode(rx)
+    assert used == len(rx), (res, rx)
+    return res
+
+
 @cocotb.test()
 async def test_swd_read_write(dut):
     chip, dp, contention = await setup(dut)
@@ -143,8 +158,7 @@ async def test_swd_read_write(dut):
     b.write(0, 0x4, 0x50000000)     # CTRL/STAT: power-up requests
     b.read(0, 0x4)
     b.write(0, 0x8, 0x000000F0)     # SELECT
-    rx = await chip.stream(0, b.tx, b.n_rx_words())
-    res = b.decode(rx)
+    res = await run(chip, b, 10)
     assert res[0] == (swd.ACK_OK, DP_IDCODE, True), res[0]
     assert res[1] == (swd.ACK_OK,)
     assert res[2] == (swd.ACK_OK, 0x50000000, True), res[2]
@@ -156,20 +170,39 @@ async def test_swd_read_write(dut):
 
 @cocotb.test()
 async def test_swd_bad_request_and_recovery(dut):
-    """A request with bad parity gets no ACK (the pull-up reads 0b111); a
-    line reset recovers the target."""
+    """A request with bad parity gets no ACK (the pull-up reads 0b111); the
+    program skips the data phase, and a line reset recovers the target."""
     chip, dp, contention = await setup(dut)
     b = swd.Batch()
     b.line_reset()
-    good = swd.request(0, 1, 0)
-    b.tx += [7 | swd.DRIVE, good ^ (1 << 5)]  # flip the parity bit
-    b.reads += [1, 3]
-    b.tx += [0 | swd.READ, 2 | swd.READ]
+    b.transaction(swd.request(0, 1, 0) ^ (1 << 5), read=True)  # flip the parity bit
     b.idle()
     b.line_reset()
     b.read(0, 0x0)
-    rx = await chip.stream(0, b.tx, b.n_rx_words())
-    assert rx[1] >> 13 == 0b111, hex(rx[1])
-    assert b.decode(rx) == [(swd.ACK_OK, DP_IDCODE, True)]
+    res = await run(chip, b, 5)
+    assert res == [(swd.ACK_NONE,), (swd.ACK_OK, DP_IDCODE, True)], res
     assert dp.log[0][0] == "bad_request"
     assert not contention
+
+
+@cocotb.test()
+async def test_swd_wait_and_fault(dut):
+    """WAIT and FAULT have no data phase (ADIv5 with ORUNDETECT = 0). The
+    write's data would read as a valid request (0xA5, a DP IDCODE read) if
+    it were sent anyway, and the target would then drive SWDIO against the
+    host. The program drops the data, reports the ACK, and goes on."""
+    chip, dp, contention = await setup(dut)
+    dp.acks = [swd.ACK_WAIT, swd.ACK_FAULT]
+    b = swd.Batch()
+    b.line_reset()
+    b.write(0, 0x8, 0x000000A5)     # WAIT
+    b.read(0, 0x4)                  # FAULT
+    b.write(0, 0x8, 0x000000A5)     # retried: OK
+    b.read(0, 0x0)
+    res = await run(chip, b, 7)
+    assert res == [(swd.ACK_WAIT,), (swd.ACK_FAULT,), (swd.ACK_OK,), (swd.ACK_OK, DP_IDCODE, True)], res
+    requests = [e[1:] for e in dp.log if e[0] == "request"]
+    assert requests == [(swd.request(0, 0, 0x8), swd.ACK_WAIT), (swd.request(0, 1, 0x4), swd.ACK_FAULT),
+                        (swd.request(0, 0, 0x8), swd.ACK_OK), (swd.request(0, 1, 0x0), swd.ACK_OK)], dp.log
+    assert dp.select == 0xA5
+    assert not contention, "host and target drove SWDIO at the same time"

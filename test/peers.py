@@ -2,7 +2,8 @@
 """Independent protocol peers. They only watch and drive pins, and share no
 code or state with the programs under test."""
 
-from cocotb.triggers import ClockCycles, RisingEdge
+from cocotb.triggers import ClockCycles, RisingEdge, Timer
+from cocotb.utils import get_sim_time
 
 
 async def uart_receive(clk, line, bit_cycles, nbytes, timeout=100000):
@@ -46,86 +47,163 @@ async def uart_transmit(clk, set_line, bit_cycles, data, stop=1):
         await ClockCycles(clk, 2 * bit_cycles)
 
 
-async def spi_peripheral(clk, sck, mosi, set_miso, miso_bytes, nbits):
-    """SPI mode 0 peripheral: samples MOSI on SCK rising, changes MISO on
-    SCK falling, most significant bit first. Returns the MOSI bytes."""
+async def spi_peripheral(clk, sck, mosi, set_miso, miso_bytes, nbits, mode=0):
+    """SPI peripheral in mode 0-3, most significant bit first. CPOL is the
+    SCK idle level; with CPHA 0 it samples MOSI on the leading edge and
+    changes MISO on the trailing one, with CPHA 1 the other way round.
+    Returns the MOSI bytes."""
+    cpol, cpha = mode >> 1, mode & 1
     miso_bits = [(b >> (7 - i)) & 1 for b in miso_bytes for i in range(8)]
-    idx = 0
-    set_miso(miso_bits[0])
+    out = iter(miso_bits + [0] * nbits)
+    if not cpha:
+        set_miso(next(out))  # the first bit is out before the first edge
     got = []
     prev = sck()
+    assert prev == cpol, f"SCK must idle at CPOL = {cpol}"
     while len(got) < nbits:
         await RisingEdge(clk)
         cur = sck()
-        if not prev and cur:
-            got.append(mosi())
-        elif prev and not cur:
-            idx += 1
-            set_miso(miso_bits[idx] if idx < len(miso_bits) else 0)
+        if cur != prev:
+            leading = prev == cpol
+            if leading != bool(cpha):
+                got.append(mosi())
+            elif cpha or got:
+                set_miso(next(out))
         prev = cur
     return [sum(got[8 * i + j] << (7 - j) for j in range(8)) for i in range(nbits // 8)]
 
 
-class I2CTarget:
-    """I2C target on open-drain lines. ACKs bytes when the address matches,
-    and stretches SCL after every ACK clock."""
+# UM10204 Table 10 minimums in ns, and the maximum SCL frequency.
+I2C_TIMING = {
+    100_000: dict(hd_sta=4000, low=4700, high=4000, su_sta=4700, su_dat=250, su_sto=4000, buf=4700),
+    400_000: dict(hd_sta=600, low=1300, high=600, su_sta=600, su_dat=100, su_sto=600, buf=1300),
+}
 
-    def __init__(self, chip, sda_bit, scl_bit, address, stretch=0):
+
+class I2CTarget:
+    """I2C target with a 256-byte memory on open-drain lines: a write's first
+    data byte sets the address pointer, further bytes are stored and reads
+    return bytes from the pointer. It ACKs its own address only, stretches
+    SCL after every acknowledge clock, and checks the bus timing against
+    UM10204 in absolute time, whatever the chip clock."""
+
+    def __init__(self, chip, sda_bit, scl_bit, address, stretch_ns=0, speed=100_000):
         self.chip = chip
         self.sda_bit = sda_bit
         self.scl_bit = scl_bit
         self.address = address
-        self.stretch = stretch
-        self.transactions = []
+        self.stretch_ns = stretch_ns
+        self.speed = speed
+        self.limits = I2C_TIMING[speed]
+        self.mem = bytearray(256)
+        self.ptr = 0
+        self.transactions = []   # bytes seen on the bus, per START
         self.starts = 0
         self.stops = 0
+        self.violations = []
+        self.periods = []        # SCL rising edge to rising edge, ns
 
     def _lines(self):
         v = self.chip.uio()
         return (v >> self.sda_bit) & 1, (v >> self.scl_bit) & 1
 
+    def _check(self, name, value):
+        if value < self.limits[name]:
+            self.violations.append((name, value, self.limits[name]))
+
+    def _drive(self, bit):
+        self.chip.drive_uio(self.sda_bit, None if bit else 0)
+
     async def run(self, clk):
         sda_p, scl_p = self._lines()
-        bits = []
+        t_rise = t_fall = t_sda = t_start = t_stop = None
+        active, n, clocked = False, 0, False
+        shift, first, matched, reading, nacked, driving = 0, True, False, False, False, False
         cur = None
-        matched = False
-        acking = False
-        nbit = 0
         while True:
             await RisingEdge(clk)
+            now = get_sim_time("ns")
             sda, scl = self._lines()
-            if scl and scl_p and sda_p and not sda:  # START
+            if scl and not scl_p:                                   # SCL rises
+                if t_fall is not None and active:
+                    self._check("low", now - t_fall)
+                if t_sda is not None and active:
+                    self._check("su_dat", now - t_sda)
+                if t_rise is not None and active:
+                    self.periods.append(now - t_rise)
+                t_rise, t_sda = now, None
+                clocked = True
+                if active and n < 8 and not reading:
+                    shift = (shift << 1) | sda
+                elif active and n == 8 and reading:
+                    nacked = bool(sda)
+            elif scl_p and not scl:                                 # SCL falls
+                if t_rise is not None and active:
+                    self._check("high", now - t_rise)
+                if t_start is not None and t_start > (t_rise or 0):
+                    self._check("hd_sta", now - t_start)
+                t_fall = now
+                if active and clocked:
+                    clocked = False
+                    if n == 7:
+                        if reading:
+                            self._drive(1)                          # release for the ACK
+                        else:
+                            byte = shift & 0xFF
+                            cur.append(byte)
+                            if first:
+                                matched = byte >> 1 == self.address
+                                reading_next = bool(byte & 1)
+                            elif matched:
+                                if first_data:
+                                    self.ptr = byte
+                                else:
+                                    self.mem[self.ptr] = byte
+                                    self.ptr = (self.ptr + 1) & 0xFF
+                                first_data = False
+                            if matched:
+                                self._drive(0)                      # ACK
+                    elif n == 8:
+                        if first:
+                            first, first_data, reading = False, True, matched and reading_next
+                        elif reading and nacked:
+                            reading = False
+                            matched = False                         # wait for STOP
+                        self._drive(1)
+                        if reading:
+                            shift = self.mem[self.ptr]
+                            cur.append(shift)
+                            self.ptr = (self.ptr + 1) & 0xFF
+                            self._drive(shift >> 7)
+                        if self.stretch_ns:
+                            self.chip.drive_uio(self.scl_bit, 0)
+                            await Timer(self.stretch_ns, unit="ns")
+                            self.chip.drive_uio(self.scl_bit, None)
+                            n, shift = 0, shift if reading else 0
+                            sda_p, scl_p = self._lines()[0], 0
+                            continue
+                        shift = shift if reading else 0
+                    elif reading:
+                        self._drive((shift >> (6 - n)) & 1)
+                    n = (n + 1) % 9
+            elif scl and sda_p and not sda:                         # START
+                if active and t_rise is not None:
+                    self._check("su_sta", now - t_rise)
+                elif t_stop is not None:
+                    self._check("buf", now - t_stop)
                 self.starts += 1
                 cur = []
                 self.transactions.append(cur)
-                bits, nbit, matched = [], 0, False
-            elif scl and scl_p and not sda_p and sda:  # STOP
+                active, n, clocked, shift, first, reading = True, 0, False, 0, True, False
+                t_start = now
+            elif scl and not sda_p and sda:                         # STOP
+                if t_rise is not None:
+                    self._check("su_sto", now - t_rise)
                 self.stops += 1
-                cur = None
-            elif cur is not None and scl and not scl_p:  # SCL rising
-                if nbit < 8:
-                    bits.append(sda)
-                nbit += 1
-            elif cur is not None and not scl and scl_p:  # SCL falling
-                if nbit == 8:
-                    byte = sum(b << (7 - i) for i, b in enumerate(bits))
-                    if not cur:
-                        matched = (byte >> 1) == self.address
-                    cur.append(byte)
-                    if matched:
-                        self.chip.drive_uio(self.sda_bit, 0)
-                        acking = True
-                elif nbit == 9:
-                    if acking:
-                        self.chip.drive_uio(self.sda_bit, None)
-                        acking = False
-                    bits, nbit = [], 0
-                    if self.stretch:
-                        self.chip.drive_uio(self.scl_bit, 0)
-                        await ClockCycles(clk, self.stretch)
-                        self.chip.drive_uio(self.scl_bit, None)
-                        # SCL was low until now; the release itself may be
-                        # the next rising edge, so do not record it as high.
-                        sda_p, scl_p = self._lines()[0], 0
-                        continue
+                active, cur, t_stop, reading = False, None, now, False
+                self._drive(1)
+            elif sda != sda_p and not scl:                          # data change
+                if t_fall is not None and now - t_fall <= 0:
+                    self.violations.append(("hd_dat", now - t_fall, 1))
+                t_sda = now
             sda_p, scl_p = sda, scl
