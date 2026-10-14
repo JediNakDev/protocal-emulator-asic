@@ -1,11 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-"""SWD host program against an independent ADIv5 debug-port model."""
+"""SWD host program against an independent ADIv5 debug-port model, in
+absolute time at the 50 MHz clock profile."""
 
 import cocotb
 from cocotb.triggers import RisingEdge
 
-from chip import Chip, regs
+from chip import MHZ_50, Chip, fails_at_wrong_clock, regs
 from pe.proto import swd
+from peers import Wave, clock_violations, now_ns, setup_hold_violations, sleep_ns
+
+PROFILE = MHZ_50
+SWCLK_HZ = 6_250_000  # 8 cycles per SWCLK at CLKDIV 0
 
 SWDIO, SWCLK = 0, 2
 DP_IDCODE = 0x2BA01477
@@ -13,10 +18,16 @@ DP_IDCODE = 0x2BA01477
 
 class DebugPortModel:
     """SW-DP: samples SWDIO on SWCLK rising edges and changes its own bits
-    right after a rising edge. Edge numbers count from the start bit (1)."""
+    `tco_ns` after a rising edge. Edge numbers count from the start bit (1).
+    `check()` reports SWCLK periods off the nominal rate and host data
+    setup or hold times below 10 ns at the edges where the host drives."""
 
-    def __init__(self, chip):
+    def __init__(self, chip, tco_ns=10.0):
         self.chip = chip
+        self.tco_ns = tco_ns
+        self.swclk = Wave(chip.dut.uio_in, SWCLK)
+        self.host_data = Wave(chip.dut.uio_out, SWDIO)
+        self.host_samples = []
         self.acks = []  # ACKs to give the next valid requests instead of OK
         self.state = "reset_wait"
         self.ones = 0
@@ -24,11 +35,15 @@ class DebugPortModel:
         self.select = 0
         self.log = []
 
-    def _drive(self, bit):
+    async def _later(self, bit):
+        await sleep_ns(self.tco_ns)
         self.chip.drive_uio(SWDIO, bit)
 
+    def _drive(self, bit):
+        cocotb.start_soon(self._later(bit))
+
     def _release(self):
-        self.chip.drive_uio(SWDIO, None)
+        cocotb.start_soon(self._later(None))
 
     def _start(self, req):
         start, apndp, rnw = req & 1, (req >> 1) & 1, (req >> 2) & 1
@@ -104,19 +119,22 @@ class DebugPortModel:
             if len(self.req_bits) == 8:
                 self._start(sum(b << i for i, b in enumerate(self.req_bits)))
 
-    async def run(self, clk):
-        prev = 0
+    async def run(self):
+        dut = self.chip.dut
         while True:
-            await RisingEdge(clk)
-            v = self.chip.uio()
-            clk_level = (v >> SWCLK) & 1
-            if clk_level and not prev:
-                self._edge((v >> SWDIO) & 1)
-            prev = clk_level
+            if await self.swclk.change():
+                if (int(dut.uio_oe.value) >> SWDIO) & 1:
+                    self.host_samples.append(now_ns())
+                self._edge((self.chip.uio() >> SWDIO) & 1)
+
+    def check(self):
+        out, checked = clock_violations(self.swclk, True, SWCLK_HZ)
+        assert checked, "no SWCLK period to check"
+        return out + setup_hold_violations(self.host_data, self.host_samples, 10, 10, "SWDIO")
 
 
-async def setup(dut):
-    chip = Chip(dut)
+async def setup(dut, hz=PROFILE):
+    chip = Chip(dut, hz)
     await chip.start()
     await chip.set_quad()
     chip.pull_up(1 << SWDIO)
@@ -129,7 +147,7 @@ async def setup(dut):
     await chip.pincfg(SWDIO, regs.DRIVE_PUSH_PULL)
     await chip.pincfg(SWCLK, regs.DRIVE_PUSH_PULL)
     dp = DebugPortModel(chip)
-    cocotb.start_soon(dp.run(dut.clk))
+    cocotb.start_soon(dp.run())
     contention = []
 
     async def watch():
@@ -149,9 +167,8 @@ async def run(chip, b, n_rx):
     return res
 
 
-@cocotb.test()
-async def test_swd_read_write(dut):
-    chip, dp, contention = await setup(dut)
+async def read_write_session(dut, hz=PROFILE):
+    chip, dp, contention = await setup(dut, hz)
     b = swd.Batch()
     b.line_reset()
     b.read(0, 0x0)                  # DP IDCODE
@@ -166,6 +183,19 @@ async def test_swd_read_write(dut):
     assert dp.select == 0xF0
     assert ("write", 0x4, 0x50000000, True) in dp.log
     assert not contention, "host and target drove SWDIO at the same time"
+    violations = dp.check()
+    assert not violations, violations[:5]
+
+
+@cocotb.test()
+async def test_swd_read_write(dut):
+    await read_write_session(dut)
+
+
+@cocotb.test()
+async def test_swd_wrong_clock(dut):
+    msg = await fails_at_wrong_clock(lambda hz: read_write_session(dut, hz), PROFILE)
+    assert "timing: clock period" in msg, msg
 
 
 @cocotb.test()
@@ -183,6 +213,7 @@ async def test_swd_bad_request_and_recovery(dut):
     assert res == [(swd.ACK_NONE,), (swd.ACK_OK, DP_IDCODE, True)], res
     assert dp.log[0][0] == "bad_request"
     assert not contention
+    assert not dp.check()
 
 
 @cocotb.test()
@@ -206,3 +237,4 @@ async def test_swd_wait_and_fault(dut):
                         (swd.request(0, 0, 0x8), swd.ACK_OK), (swd.request(0, 1, 0x0), swd.ACK_OK)], dp.log
     assert dp.select == 0xA5
     assert not contention, "host and target drove SWDIO at the same time"
+    assert not dp.check()

@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Host-side PS/2 framing for programs/ps2_device.pasm and ps2_host.pasm."""
 
+# Receive word reporting a failure: the host program's peer did not clock in
+# time, or the device program's frame was inhibited. Real frames and
+# acknowledgements have bits 5:0 clear.
+FAIL = 0xFFFF
+
 
 def _odd_parity(b):
     return 1 - (bin(b).count("1") & 1)
@@ -24,4 +29,8 @@ def decode(word):
 
 
 def acked(word):
-    return (word >> 15) & 1 == 0
+    return word != FAIL and (word >> 15) & 1 == 0
+
+
+def failed(word):
+    return word == FAIL
