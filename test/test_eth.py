@@ -1,28 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
 """10BASE-T transmit and receive programs against independent Manchester
-peers, at 40 MHz."""
+peers in absolute time, at the 40 MHz clock profile."""
 
 import os
 import random
 import zlib
 
 import cocotb
-from cocotb.triggers import RisingEdge, Timer
+from cocotb.triggers import Timer
 from cocotb.utils import get_sim_time
 
-from chip import Chip, assemble, program_source, regs
+from chip import MHZ_40, Chip, fails_at_wrong_clock, regs
 from pe import g2 as g2lib
 from pe.proto import eth
+from peers import Wave, now_ns, sleep_ns
 
+PROFILE = MHZ_40
 TDP, TDM, RX = 2, 3, 8
-CLK_PS = 25000  # 40 MHz
+BIT_NS = 100.0
+TX_TOLERANCE_NS = 2.0  # transmitted transitions from the 100 ns grid
+TP_IDL_NS = (250, 350)  # TD+ high after the last bit cell, 802.3 14.3.1.2.1
 GATES = os.environ.get("GATES") == "yes"
 DST = bytes.fromhex("ffffffffffff")
 SRC = bytes.fromhex("020000000001")
 
 
-async def new_chip(dut):
-    chip = Chip(dut, clk_ps=CLK_PS)
+async def new_chip(dut, hz=PROFILE):
+    chip = Chip(dut, hz)
     await chip.start()
     await chip.set_quad()
     return chip
@@ -35,24 +39,64 @@ def wire_frame(payload):
     return bytes([0x55] * 7 + [0xD5]) + body + zlib.crc32(body).to_bytes(4, "little")
 
 
-async def decode_tx(chip, n_cycles):
-    """Sample TD+/TD- every cycle and decode Manchester (IEEE 802.3)."""
-    dut = chip.dut
-    s = []
-    for _ in range(n_cycles):
-        await RisingEdge(dut.clk)
-        v = int(dut.uio_out.value)
-        s.append(((v >> TDP) & 1, (v >> TDM) & 1))
-    tdp = [a for a, _ in s]
-    t0 = next(i for i in range(1, len(tdp)) if tdp[i] != tdp[i - 1])  # first mid-bit edge
-    bits, t = [], t0
-    while t + 1 < len(tdp) and tdp[t] != tdp[t - 1]:
-        bits.append(tdp[t])
-        t += 4
-    frame_samples = s[t0 - 2:t - 2]
-    differential = all(a != b for a, b in frame_samples)
-    idle_high = tdp[t - 2:t + 8]
-    return bits, differential, idle_high, s[-1]
+class TxMonitor:
+    """Records TD+ and TD- from construction on and decodes one frame in
+    absolute time: the first TD+ change is the mid-bit transition of the
+    first preamble bit; mid-bit transitions must follow every 100 ns, any
+    other transition only at bit boundaries, TD- must be the complement of
+    TD+ until the end of TP_IDL, and TP_IDL must hold TD+ high for
+    250-350 ns after the last bit cell, followed by idle (both low)."""
+
+    def __init__(self, dut):
+        self.tdp = Wave(dut.uio_out, TDP)
+        self.tdm = Wave(dut.uio_out, TDM)
+
+    async def frame(self, n_bits, timeout_ns=None):
+        timeout_ns = timeout_ns or (n_bits * BIT_NS + 20_000)
+        t_end = now_ns() + timeout_ns
+        while not self.tdp.times and now_ns() < t_end:
+            await sleep_ns(1000)
+        assert self.tdp.times, "no frame"
+        t0 = self.tdp.times[0]
+        await sleep_ns(max(0, t0 + n_bits * BIT_NS + 1000 - now_ns()))
+        return self.decode(t0, n_bits)
+
+    def decode(self, t0, n_bits):
+        bits, out = [], []
+        tol = TX_TOLERANCE_NS
+        for k in range(n_bits):
+            tk = t0 + k * BIT_NS
+            near = self.tdp.edges(tk - BIT_NS / 4, tk + BIT_NS / 4)
+            if len(near) != 1 or abs(near[0] - tk) > tol:
+                out.append(f"timing: Manchester mid-bit {k} expected at {tk:.1f} ns, edges {near}")
+                break
+            bits.append(self.tdp.at(near[0]))
+        t_last = t0 + (n_bits - 1) * BIT_NS + BIT_NS / 2  # end of the last bit cell
+        for t in self.tdp.edges(t0, t_last - BIT_NS / 4):
+            phase = (t - t0) % BIT_NS
+            if min(phase, BIT_NS - phase) > tol and abs(phase - BIT_NS / 2) > tol:
+                out.append(f"timing: TD+ transition off the bit grid at {t:.1f} ns")
+                break
+        rest = self.tdp.edges(t_last - BIT_NS / 4)
+        if not out:
+            if self.tdp.at(t_last + 1) != 1 or len(rest) == 0 or rest[-1] < t_last:
+                out.append("TP_IDL: TD+ not high after the last bit")
+            else:
+                high = rest[-1] - t_last
+                if not TP_IDL_NS[0] <= high <= TP_IDL_NS[1]:
+                    out.append(f"timing: TP_IDL high for {high:.1f} ns")
+                end = rest[-1]
+                for t in self.tdp.edges(t0 - BIT_NS, end) + self.tdm.edges(t0 - BIT_NS, end):
+                    if self.tdp.at(t) == self.tdm.at(t) and t < end:
+                        out.append(f"TD- is not the complement of TD+ at {t:.1f} ns")
+                        break
+                if self.tdp.at(end) or self.tdm.at(end):
+                    out.append("idle after TP_IDL: TD+ and TD- low")
+        return bits, out
+
+
+def bits_of(wire):
+    return [(b >> j) & 1 for b in wire for j in range(8)]
 
 
 async def tx_setup(chip):
@@ -66,25 +110,34 @@ async def tx_setup(chip):
     await chip.pincfg(TDM, regs.DRIVE_PUSH_PULL)
 
 
-@cocotb.test()
-async def test_eth_transmit(dut):
-    chip = await new_chip(dut)
+async def transmit_session(dut, hz=PROFILE):
+    chip = await new_chip(dut, hz)
     await tx_setup(chip)
     payload = bytes(range(46)) + b"protocol emulator"
     wire = eth.frame(DST, SRC, 0x0800, payload)
     assert wire == wire_frame(payload)
     words = eth.tx_words(wire)
     await chip.push(0, words[:8])
-    sampler = cocotb.start_soon(decode_tx(chip, len(wire) * 8 * 4 + 600))
+    monitor = TxMonitor(dut)
     await chip.enable(1)
     await chip.stream(0, words[8:], 0, depth=8)
-    bits, differential, idle_high, last = await sampler
-    got = bytes(sum(bits[8 * k + j] << j for j in range(8)) for k in range(len(bits) // 8))
-    assert len(bits) == len(wire) * 8, (len(bits), len(wire) * 8)
-    assert got == wire
-    assert differential, "TD- must be the complement of TD+ during the frame"
-    assert all(idle_high), f"TP_IDL: TD+ high after the last bit, got {idle_high}"
-    assert last == (0, 0), "idle after TP_IDL"
+    bits, violations = await monitor.frame(len(wire) * 8)
+    assert not violations, violations[:5]
+    assert bits == bits_of(wire)
+
+
+@cocotb.test()
+async def test_eth_transmit(dut):
+    await transmit_session(dut)
+
+
+@cocotb.test()
+async def test_eth_wrong_clock(dut):
+    """At 50 MHz the 40 MHz transmit program sends 12.5 Mbit/s, which the
+    monitor rejects. (The receive table's windows also span a jitter-free
+    10 Mbit/s frame at 50 MHz; its driver runs on timers in ns either way.)"""
+    msg = await fails_at_wrong_clock(lambda hz: transmit_session(dut, hz), PROFILE)
+    assert "timing: Manchester" in msg, msg
 
 
 async def drive_rx(chip, wire, jitter_ns, start_ns, seed):
@@ -169,13 +222,13 @@ async def no_overflow(chip):
     assert not (await chip.read8(regs.STICKY)) & regs.STK_RX_OVF1, "receive overflow"
 
 
-async def receive(dut, payload, jitter_ns, start_ns, seed=1):
-    chip = await new_chip(dut)
+async def receive(dut, payload, jitter_ns, start_ns, seed=1, hz=PROFILE):
+    chip = await new_chip(dut, hz)
     chip.set_pin8(0)
     await rx_setup(chip)
     wire = wire_frame(payload)
     cocotb.start_soon(drive_rx(chip, wire, jitter_ns, start_ns, seed))
-    (record,), words = await collect_records(chip, 1)
+    (record,), words = await collect_records(chip, 1, timeout=20_000)
     check_frame(record, wire)
     await no_overflow(chip)
 
@@ -262,12 +315,12 @@ async def test_eth_link_pulses(dut):
     # A frame between pulses: it starts within 10 cycles of its command.
     wire = eth.frame(DST, SRC, 0x0800, bytes(46))
     words = eth.tx_words(wire)
-    sampler = cocotb.start_soon(decode_tx(chip, len(wire) * 8 * 4 + 600))
+    monitor = TxMonitor(dut)
     await chip.push(0, words[:8])
     await chip.stream(0, words[8:], 0, depth=8)
-    bits, differential, idle_high, last = await sampler
-    assert bits == [(b >> j) & 1 for b in wire for j in range(8)]
-    assert differential and all(idle_high) and last == (0, 0)
+    bits, violations = await monitor.frame(len(wire) * 8)
+    assert not violations, violations[:5]
+    assert bits == bits_of(wire)
     end = get_sim_time("ns")
     (t, width, tdm), = await td_pulses(dut, 1)
     assert width == 100 and tdm == 0
