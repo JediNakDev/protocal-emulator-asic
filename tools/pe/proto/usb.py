@@ -13,6 +13,10 @@ J, K, SE0 = 2, 1, 0
 # the reply must start within 17 bit times of the end of the host's SE0.
 REPLY_DEADLINE = 127
 
+# Bus reset: SE0 for whole units of 12297 ticks, 1.025 ms at 48 MHz.
+RESET_UNIT_TICKS = 12297
+TICK_S = 4 / 48e6
+
 
 def pid_byte(pid):
     return pid | ((pid ^ 0xF) << 4)
@@ -75,12 +79,20 @@ def command(packet_bits, reply, deadline=REPLY_DEADLINE):
     """Transmit words for one packet: the command word, then line states.
     With `reply`, the program waits up to `deadline` ticks for an answer."""
     states = line_states(packet_bits)
-    assert len(states) <= 256 and 0 < deadline < 256
+    assert len(states) <= 256 and 0 < deadline < 128
     words = [(len(states) - 1) | ((deadline if reply else 0) << 8)]
     for i in range(0, len(states), 8):
         chunk = states[i:i + 8]
         words.append(sum(s << (2 * j) for j, s in enumerate(chunk)))
     return words
+
+
+def reset(ms=10.0):
+    """Command word for a bus reset: SE0 for at least `ms` milliseconds
+    (USB 2.0 section 7.1.7.5 requires 10 ms), then J."""
+    units = -(-round(ms * 1e-3 / TICK_S) // RESET_UNIT_TICKS)
+    assert 0 < units <= 256
+    return [(units - 1) | 0x8000]
 
 
 def split_records(words):
