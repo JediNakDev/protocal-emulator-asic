@@ -62,3 +62,9 @@ def test_assembler_checks_page_jumps():
         assemble("set page, far\njmp !y near\nnear: jmp near\nfar: jmp far").words(61)
     with pytest.raises(AsmError, match="does not fit"):
         assemble("nop\n" * 3).words(126)
+    # The default wrap, at the last instruction (address 65, page address 1),
+    # would also wrap after the `nop` at page address 1 in page 0.
+    wrapping = "nop\nset page, far\njmp far\n" + "jmp 0\n" * 61 + "far: set page, 0\njmp 0\n"
+    with pytest.raises(AsmError, match="wrap address"):
+        assemble(wrapping).words(0)
+    assert len(assemble(wrapping.replace("jmp far\n", "jmp far\n.wrap\n", 1)).words(0)) == 66

@@ -21,7 +21,10 @@ A program may span both pages of instruction memory. `set page, label` selects
 the page of a label for the next jump taken, so `set page, far` followed by
 `jmp far` crosses pages. The assembler checks that every jump to a label in
 the other page directly follows such a `set page`, and that straight-line code
-does not run across a page boundary (execution wraps within its page).
+does not run across a page boundary (execution wraps within its page). The
+wrap bounds are page addresses, so the wrap happens at the `.wrap` address in
+either page; the assembler rejects a program that would reach that address in
+the other page without a jump.
 
 Comments start with ';' or '//'. Numbers may be decimal, 0x or 0b.
 `.define NAME value` creates a constant.
@@ -92,6 +95,7 @@ class Program:
         page it lands in, so every label starts in its own page."""
         n = len(words)
         page = lambda i: (i + offset) // PAGE_SIZE
+        top = (self.wrap + offset) % PAGE_SIZE
         state = [set() for _ in range(n)]
         work = [0, *(t for t in self.labels.values() if t < n)]
         for i in work:
@@ -107,6 +111,9 @@ class Program:
             jp = {w & 1} if w >> 13 == 7 and (w >> 5) & 7 == 3 else state[i]
             if _ends_flow(w):
                 continue
+            if i != self.wrap and (i + offset) % PAGE_SIZE == top:
+                raise AsmError(f"{self.name}: instruction {i} is at the wrap address in its"
+                               " page and would wrap; move `.wrap`")
             nxt = self.wrap_target if i == self.wrap else i + 1
             if nxt >= n:
                 continue

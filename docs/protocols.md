@@ -21,21 +21,21 @@ They do not cover pad timing, metastability, clock duty cycle or analog front en
 | I2C | Controller | 24 | Open-drain, side-set clock, `wait` for stretching | 50 MHz, 100 kHz and 400 kHz | Writes, reads with repeated START, NACK of a wrong address and of the last read byte, target clock stretching; every UM10204 timing minimum checked in absolute time |
 | JTAG | Controller | 2 | Side-set, autopull/autopush | 50 MHz, TCK 6.25 MHz | IDCODE, IR capture, DR read/write, BYPASS against an IEEE 1149.1 TAP model |
 | SWD | Host (probe) | 48 | Side-set, SWDIO turnaround, on-chip ACK check | 50 MHz, SWCLK 6.25 MHz | IDCODE read, CTRL/STAT write and read-back, SELECT write; WAIT and FAULT skip the data phase; bad-parity request recovery; no SWDIO contention |
-| PS/2 | Device (keyboard) | 22 | Open-drain, `status`, side-set clock | 50 MHz | Scan codes to a host model; host command with request-to-send and acknowledge |
-| PS/2 | Host | 25 | Open-drain, inhibit, `status` | 50 MHz | Device frames; reset command acknowledged, 0xFA and 0xAA received |
+| PS/2 | Device (keyboard) | 34 | Open-drain, `status`, side-set clock, timed wait | 50 MHz | Scan codes to a host model; host command with request-to-send and acknowledge; an inhibited bus defers a frame, and an inhibit mid-frame aborts it with 0xFFFF reported |
+| PS/2 | Host | 42 | Open-drain, inhibit, `status`, timed wait | 50 MHz | Device frames; reset command acknowledged, 0xFA and 0xAA received; an absent device or one that stops clocking is reported with 0xFFFF and the lines released |
 | CAN 2.0A | Receiver (listen-only) | 21 | G2 destuffer, emit into ISR, timed wait, `isrcnt` | 50 MHz, 1 Mbit/s | Stuff-heavy and 8-byte frames; transmitter 1.5% fast and 1.5% slow, with the longest stretches between resynchronizing edges |
-| CAN 2.0A | Transmitter | 19 | G8 indexed jump, `irq wait` | 50 MHz, 1 Mbit/s | ACKed by a node; lost arbitration detected, winner received, retransmission ACKed |
-| Low-speed USB | Host | 18 + 5 | G2 clock-recovering NRZI receiver, pattern wait, timed wait, both engines | 48 MHz, 1.5 Mbit/s | GET_DESCRIPTOR (SETUP, DATA0, ACK, IN, DATA1, ACK) with device clocks exact, 1.5% fast and 1.5% slow; a missing reply ends at a 17-bit-time deadline and the next command runs |
+| CAN 2.0A and 2.0B | Node: transmitter with arbitration, receiver that checks the CRC and acknowledges | 99 + 29 | G2 destuffer with bit-error check, emitting into the other engine; CRC (G1); field handlers by `mov pc`; `set page` across both pages; timed wait | 50 MHz, 1 Mbit/s | Standard, extended and remote frames from a node alone on the bus acknowledged by the chip, including frames with a stuff bit before the CRC delimiter, from a transmitter exact, 1.5% fast and 1.5% slow; frames with a bad CRC not acknowledged; frames sent by the chip and acknowledged by a node; lost arbitration (the chip receives and acknowledges the winner, then the Host sends again) and won arbitration |
+| Low-speed USB | Host | 37 + 5 | G2 clock-recovering NRZI receiver, pattern wait, timed wait, both engines | 48 MHz, 1.5 Mbit/s | GET_DESCRIPTOR (SETUP, DATA0, ACK, IN, DATA1, ACK) with device clocks exact, 1.5% fast and 1.5% slow; a missing reply ends at a 17-bit-time deadline and the next command runs; keep-alives at least every 1 ms while idle; a 10 ms bus reset on request |
 | 10BASE-T | Transmitter | 21 | G8 indexed jump, 2-pin side-set, `status` | 40 MHz, 10 Mbit/s | 89-byte frame, TD- complementary, TP_IDL, FCS; normal link pulses every 16.4 ms while idle |
 | 10BASE-T | Receiver | 7 | G2 Manchester decoder, falling-edge sampling (pin 15), emit into ISR, `isrcnt` | 40 MHz, 10 Mbit/s | Frames at five input phases and with +/- 8 ns jitter per transition; back-to-back frames at the minimum interframe gap and link pulses, separated exactly whenever the Host reads them |
 | Any (waveform) | Capture and replay | 7 + 3 | Edge capture (G3), flag wait, autopush/autopull | 50 MHz, 1-cycle resolution | Random edges 4 to 100,003 cycles apart, captured and replayed with every interval exact; a UART byte edited on the Host and decoded by an independent receiver |
 
-The largest pair that must run together, CAN transmit plus receive, uses 40 of the 64 instruction words; SWD alone uses 48.
+The CAN node, `can_node` with `can_line`, uses all 128 instruction words (99 + 29), so no other program runs beside it; the largest single-page program, SWD, uses 48.
 
 ## Record framing
 
 Receivers whose messages have no fixed length close each message with a count-terminated record, so the Host finds every boundary in the word stream whenever it reads it.
-`can_rx`, `usb_ls_rx` and `eth10_rx` use it, and `tools/pe/proto/records.py` splits the stream.
+`can_rx`, `can_line`, `usb_ls_rx` and `eth10_rx` use it, and `tools/pe/proto/records.py` splits the stream.
 
 - The program runs with autopush at 15 and `in` shifting left, so each data word carries 15 bits, the first in bit 14, and bit 15 is always clear.
 - At the end of a message the program reads the number of bits in the partial last word with `mov x, isrcnt`, pushes that word (0-14 bits in its low bits, possibly none), and pushes the trailer `0x8000 | count`:
@@ -46,6 +46,8 @@ Receivers whose messages have no fixed length close each message with a count-te
   mov isr, ~null
   in x, 15        ; autopushed at the threshold of 15
   ```
+
+- A program that must never stall on a full receive queue, such as `can_line`, pushes with `push iffull noblock` before each bit instead of autopush, so its last word may hold all 15 bits and its trailer count may be 15.
 
 Payload words never have bit 15 set, so a trailer cannot be mistaken for data, whatever the payload, and the record keeps its exact length in bits.
 The framing costs 1 bit in 16 of receive bandwidth and 4 instructions.
@@ -107,7 +109,7 @@ Requirements of the stream programs follow from these numbers:
 | Program | Stream | Load on the receive path | Pause the queue absorbs |
 | --- | --- | --- | --- |
 | `eth10_rx` at 40 MHz | 10 Mbit/s, 15 bits per word: a word every 60 cycles | 73% | About 150 cycles (4 µs) |
-| `can_rx` at 50 MHz | 1 Mbit/s: a word every 750 cycles | 6% | About 5,700 cycles (115 µs) |
+| `can_rx` or `can_line` at 50 MHz | 1 Mbit/s: a word every 750 cycles | 6% | About 5,700 cycles (115 µs) |
 | `usb_ls_rx` at 48 MHz | 1.5 Mbit/s: a word every 480 cycles | 9% | About 3,500 cycles (73 µs) |
 
 Ethernet in both directions at line rate, 10 Mbit/s each way, exceeds the Host port at 40 MHz; half duplex works.
@@ -119,16 +121,13 @@ Each is unfinished work toward the [mandatory baseline](../AGENTS.md#non-negotia
 
 | Limit | Protocols | Cause | Effect |
 | --- | --- | --- | --- |
-| The chip does not acknowledge CAN frames it receives | CAN | Only one engine drives a pin, and the receiver must know where the CRC ends, which needs the DLC, and the CRC verdict, within one bit time | Works as a listen-only receiver and as a transmitter on a bus with at least one other node. Not a complete CAN node. |
-| CAN error frames, error counters and bus-off are not implemented | CAN | Program size; left to the Host | A stuff error ends the record; the Host discards frames with bad CRC. |
-| CAN receive resynchronizes without a synchronization jump width limit | CAN | Every recessive-to-dominant edge in the window re-times the sample point | Tolerates a transmitter 2.2% fast to 3.5% slow in simulation, beyond CAN's 1.58%; a glitch inside the window can shift one bit's sample point. |
+| CAN error frames, error counters and bus-off are not implemented | CAN | The node uses all 128 instruction words | A stuff or bit error ends the frame without an error frame: the node waits 12 bit times and returns to idle. A frame with a bad CRC is not acknowledged, and no error frame follows it. Overload frames are not recognized. |
+| `can_rx` resynchronizes without a synchronization jump width limit | CAN | Every recessive-to-dominant edge in the window re-times the sample point | Tolerates a transmitter 2.2% fast to 3.5% slow in simulation, beyond CAN's 1.58%; a glitch inside the window can shift one bit's sample point. |
 | Ethernet receive jitter tolerance is about +/- 9 ns per transition | 10BASE-T | 16-state decoder with half-cycle sampling at 40 MHz | Passes at +/- 9 ns and fails at +/- 10 ns in simulation; IEEE 802.3 asks for more margin. Lab-grade with short cables. |
 | Ethernet full duplex at line rate exceeds the Host link | 10BASE-T | 10 Mbit/s each way needs more than the measured 14.5 Mbit/s sustained receive rate at 40 MHz | Half duplex works. Collision detection is possible because transmit and receive use different engines and G2 is free during transmit. |
 | No collision handling or link integrity state | 10BASE-T | Not written yet | The transmitter sends link pulses, and a received link pulse makes a short record without an SFD, but nothing tracks link state, detects collisions or backs off. |
 | One optional side-set pin leaves 3 delay bits | USB | Shared side-set and delay field | The USB host program runs its engine at CLKDIV 3 to reach 32 cycles per bit. |
 | The G2 receive enable goes through an output pin | USB | The bit state machine reads its inputs only from the pin space | `usb_ls_host` uses output pin 12 as the receive enable, so that pin is not available for anything else. |
-| No keep-alive or bus reset generation | USB | Not written yet | A real low-speed device suspends after 3 ms without bus activity; the Host must currently send traffic at least that often, and build the 10 ms reset SE0 from commands. |
-| PS/2 waits have no timeout | PS/2 | The programs predate the timed wait | A device that never clocks leaves the PS/2 host program waiting; the Host recovers with a forced jump. |
 | SWD supports ORUNDETECT = 0 only | SWD | Program size | With overrun detection enabled, ADIv5 expects a data phase after WAIT or FAULT, which the program skips. |
 | Controller roles only for SPI, I2C, JTAG and SWD | SPI, I2C, JTAG, SWD | Not written yet | Peripheral, target and debug-target roles need their own programs. |
 

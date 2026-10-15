@@ -28,7 +28,8 @@ The latest measured RTL (`17995b3`) reaches +4.05 ns typical-corner setup slack 
 
 [The issue #14 design review](design-review.md) defines the next architecture choices and their evidence gates.
 Timed waits, shift-count reads, exact receive records, all four SPI controller modes and I2C reads are implemented in the current working source.
-CAN acknowledgements and error recovery, USB keep-alive/reset, PS/2 deadlines and Ethernet receive margin remain required work.
+USB keep-alive and reset, PS/2 deadlines and on-chip CAN acknowledgement are implemented; the CAN node fills all 128 instruction words.
+CAN error signaling (B9) needs more instruction memory or denser instructions, and Ethernet receive margin (B12) needs a larger decoder or a faster clock; both wait on the decisions recorded in the design review.
 Develop these capabilities alongside physical feasibility; timing closure on the current demonstrations alone does not freeze an adequate architecture.
 
 ## 1. Confirm physical closure

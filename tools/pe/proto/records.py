@@ -4,7 +4,9 @@
 A receive program packs 15 bits per data word, first bit in bit 14, with
 bit 15 clear (push threshold 15, `in` shifting left). At the end of a record
 it pushes the partial last word, holding k = 0-14 bits in its low bits
-(first bit in bit k - 1), then a trailer word 0x8000 | k:
+(first bit in bit k - 1), then a trailer word 0x8000 | k. A program that
+pushes without autopush (`push iffull` before each bit) may close with a
+full last word, k = 15:
 
     mov x, isrcnt
     push
@@ -28,7 +30,7 @@ def split(words):
             cur.append(w & 0x7FFF)
             continue
         k = w & 0x7FFF
-        if not cur or k > 14:
+        if not cur or k > 15:
             records.append(None)
         else:
             bits = [(x >> (14 - i)) & 1 for x in cur[:-1] for i in range(15)]

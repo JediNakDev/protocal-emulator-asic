@@ -536,6 +536,7 @@ Within one cycle, all sets and clears combine, and a set wins over a clear.
 128 entries of 16 bits in two pages of 64, written only by the Host.
 Each engine fetches from one page at a time: PC, jump targets, wrap bounds and the jump base are addresses within a page.
 Sequential execution and the wrap stay in the current page.
+The wrap therefore applies at `WRAP_TOP` in whichever page the engine runs, so a program spanning both pages must not fall through the instruction at that address in the other page; the assembler rejects one that would.
 Each engine also holds a jump page, which `set page` writes.
 Every jump the engine takes (`jmp`, `out pc`, `mov pc`, and a forced `jmp`) goes to its target in the jump page, which becomes the fetch page.
 So after any taken jump the two pages are equal, and a far jump is `set page, p` followed by a jump.
