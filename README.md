@@ -4,7 +4,7 @@ An open-source chip for hardware debugging, protocol experiments, and reverse en
 Upload programs through the Host port to change protocol behavior after fabrication.
 The same RTL runs UART, SPI, I2C, JTAG, SWD, PS/2, CAN, low-speed USB, and 10BASE-T programs in simulation.
 
-Two programmable engines share 64 instruction words and control 13 protocol pins.
+Two programmable engines share 128 instruction words, in two pages of 64, and control 13 protocol pins.
 General building blocks provide checksums, line decoding, edge timestamps, input filtering, and cycle-exact pin operations.
 Capture and replay programs can record a waveform, edit it on the Host, and replay it for fault injection without decoding its protocol.
 See [protocol coverage and limits](docs/protocols.md) for the supported roles, timing, buffering requirements, and external hardware.

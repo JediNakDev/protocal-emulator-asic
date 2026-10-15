@@ -158,7 +158,7 @@ class Engine:
         self.set_base, self.set_count = 0, 1
         self.in_base, self.jmp_pin = 0, 0
         self.side_base, self.side_count, self.side_opt, self.side_dirs = 0, 0, False, False
-        self.jmp_base, self.jmp_pattern = 0, False
+        self.jmp_base, self.jmp_pattern, self.page = 0, False, 0
         self.status_n, self.status_rx = 0, False
         self.lfsr_feed, self.lfsr_mode, self.lfsr_right = 0, 0, False
         self.cap_pin, self.cap_edge, self.cap_flag_en, self.cap_flag = 0, 0, False, 0
@@ -193,7 +193,7 @@ class Engine:
         return self.osr_count >= self.pull_thr()
 
     def next_instruction(self, imem):
-        return self.exec_instr if self.exec_valid else imem[self.pc]
+        return self.exec_instr if self.exec_valid else imem[self.page * 64 + self.pc]
 
     def side_fields(self, sd):
         """(side-set enabled, value, delay) from instruction bits 12:8."""
@@ -503,7 +503,7 @@ class G2:
 
     def __init__(self):
         self.table = [0] * 64
-        self.enable, self.owner, self.mode, self.emit_en = False, 0, 0, False
+        self.enable, self.owner, self.mode, self.emit_en, self.emit_other = False, 0, 0, False, False
         self.in_sel = [0, 0]
         self.state, self.out = 0, 0
         self.feed_full, self.feed_bit = False, 0
@@ -543,7 +543,7 @@ class G2:
 
 class Chip:
     def __init__(self):
-        self.imem = [0] * 64
+        self.imem = [0] * 128
         self.engines = [Engine(0), Engine(1)]
         self.g2 = G2()
         self.enable = 0          # CTRL bits 1:0
@@ -603,9 +603,10 @@ class Chip:
         pins = self.pin_space(raw)
 
         g2_owner = self.g2.owner
+        emit_to = g2_owner ^ int(self.g2.emit_other)
         effects = []
         for i, eng in enumerate(self.engines):
-            emit = self.g2.emit_pending and g2_owner == i
+            emit = self.g2.emit_pending and emit_to == i
             effects.append(eng.evaluate(self, bool(_bit(self.enable, i)), pins, g2_owner == i, emit, self.g2.emit_bit))
         own = effects[g2_owner]
         g2n = self.g2.evaluate(pins, own["div_tick"], own["feed_wr"], own["feed_bit"])

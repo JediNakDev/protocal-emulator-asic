@@ -1,7 +1,7 @@
 ## How it works
 
 This chip implements digital protocols in software.
-Two engines run programs from a shared 64-instruction memory that the Host loads after power-up, so new protocols need no new silicon.
+Two engines run programs from a shared 128-instruction memory in two 64-instruction pages that the Host loads after power-up, so new protocols need no new silicon.
 The full behavior is defined in [the specification](spec.md).
 
 Each engine reads and drives 13 protocol pins with cycle-exact timing.

@@ -492,3 +492,38 @@ async def test_count_sources(dut):
     await chip.force_asm(0, "set x, 7")
     await chip.force(0, 0xC000 | (1 << 5) | (3 << 3) | 5)  # mov x, count source 5
     assert await chip.dbg(0, 1) == 0
+
+
+@cocotb.test()
+async def test_instruction_pages(dut):
+    """Each engine fetches from the page in EXECCFG bit 7: the same page
+    addresses run different programs, jumps and wrap stay in the page, and a
+    Host write while running reaches the page it addresses."""
+    chip = await new_chip(dut)
+    src = """
+        set x, {v}
+    loop:
+        in x, 16
+        push
+        jmp loop
+    """
+    for e, (offset, v) in enumerate(((3, 5), (64 + 3, 9))):
+        prog = await chip.load(src.format(v=v), offset)
+        await chip.setup_engine(e, prog, offset, shiftctrl=regs.fifo_mode(regs.FIFO_JOIN_RX))
+    assert (await chip.eread(1, regs.EXECCFG))[0] == regs.EXECCFG_PAGE1
+    await chip.enable(3)
+    await chip.cycles(40)
+    await chip.enable(0)
+    assert set(await chip.pop(0, 4)) == {5}
+    assert set(await chip.pop(1, 4)) == {9}
+    # Replace `set x` in page 1 only, then rerun both from their starts.
+    await chip.write(regs.IMEM_ADDR, 64 + 3)
+    await chip.write16(regs.IMEM_DATA, [assemble("set x, 17").code[0]])
+    for e in range(2):
+        await chip.write(regs.CMD, regs.CMD_CLEAR0 << e)
+        await chip.force(e, 3)  # jmp 3, in the engine's own page
+    await chip.enable(3)
+    await chip.cycles(40)
+    await chip.enable(0)
+    assert set(await chip.pop(0, 4)) == {5}
+    assert set(await chip.pop(1, 4)) == {17}

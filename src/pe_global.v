@@ -28,7 +28,7 @@ module pe_global (
     output reg         quad,
     // Instruction memory write port
     output wire        imem_we,
-    output reg  [5:0]  imem_addr,
+    output reg  [6:0]  imem_addr,
     output wire [15:0] imem_wdata,
     // Flags
     output reg  [7:0]  flags,
@@ -45,7 +45,7 @@ module pe_global (
     output reg  [31:0] counter
 );
 
-  localparam [7:0] ID = 8'h50, VERSION = 8'h02;
+  localparam [7:0] ID = 8'h50, VERSION = 8'h03;
 
   wire wr = bus_we & (bus_addr[6:5] == 2'b00);
 
@@ -74,7 +74,7 @@ module pe_global (
       div_sync     <= 1'b0;
       dbg_sel      <= 3'd0;
       quad         <= 1'b0;
-      imem_addr    <= 6'd0;
+      imem_addr    <= 7'd0;
       flags        <= 8'h00;
       irq_mask     <= 8'h00;
       sticky       <= 8'h00;
@@ -95,7 +95,7 @@ module pe_global (
       sticky <= (sticky & ~stk_wclr) | sticky_set;
       hirq   <= |(flags & irq_mask) | |(sticky & sticky_mask);
 
-      if (imem_we) imem_addr <= imem_addr + 6'd1;
+      if (imem_we) imem_addr <= imem_addr + 7'd1;
 
       if (wr) begin
         case (bus_addr[4:0])
@@ -103,7 +103,7 @@ module pe_global (
           5'h06: irq_mask <= bus_wdata;
           5'h08: sticky_mask <= bus_wdata;
           5'h09: quad <= bus_wdata[0];
-          5'h0A: imem_addr <= bus_wdata[5:0];
+          5'h0A: imem_addr <= bus_wdata[6:0];
           5'h13: dbg_sel <= bus_wdata[2:0];
           default: ;
         endcase
@@ -127,7 +127,7 @@ module pe_global (
         5'h07: bus_rdata = sticky;
         5'h08: bus_rdata = sticky_mask;
         5'h09: bus_rdata = {7'd0, quad};
-        5'h0A: bus_rdata = {2'd0, imem_addr};
+        5'h0A: bus_rdata = {1'b0, imem_addr};
         5'h13: bus_rdata = {5'd0, dbg_sel};
         5'h16: bus_rdata = counter[7:0];
         5'h17: bus_rdata = counter_snap[7:0];

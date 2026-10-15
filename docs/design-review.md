@@ -18,8 +18,9 @@ Measurements of program size, Host throughput and protocol tolerances come from 
 | Engines | Keep two for now; evaluate a third with the 8x4 allocation | Provisional |
 | Bit state machine (G2) | Keep one shared instance; it limits concurrency, not individual protocols | Provisional |
 | Clock | Keep 50 MHz as the physical target and 40/48/50 MHz program profiles; 60 MHz is the lowest common clock with exact integer bit intervals | Provisional, evaluation recorded |
-| Instruction memory | 64 words fit the current demonstrations; measure a complete CAN node before choosing capacity | Open |
-| Storage | Choose flip-flop, latch or SRAM from physical builds; no change yet | Open |
+| Instruction memory | 128 flip-flop words in two pages of 64; EXECCFG bit 7 selects each engine's page, so a two-engine CAN node gets a page per engine | Implemented ([spec](spec.md#instruction-memory)), capacity provisional |
+| G2 emission target | G2_CTRL bit 5 emits into the engine that does not own G2, so one engine can decode the line while the other runs the protocol | Implemented ([spec](spec.md#bit-state-machine-g2)) |
+| Storage | Flip-flops for now; latch or SRAM only after a physical build shows a gain | Open |
 | Allocation | Stay at 6x4 until the 8x4 template is available | Provisional |
 
 ## 1. Protocol status
@@ -116,11 +117,11 @@ Interactions: the count is read at the start of the cycle, before any G2 emissio
 | `spi_cpha0` / `spi_cpha1` | 2 / 3 | 1 | |
 | `jtag` | 2 | 1 | |
 
-Every program fits the 64 shared words alone, and SWD with a UART receiver fits (57).
+Every program fits one 64-word page alone, and SWD with a UART receiver fits one page together (57).
 Robust behavior costs words: SWD grew from 13 to 48 to check ACKs on chip, and the CAN receiver from 16 to 21 for resynchronization.
 A complete CAN node adds DLC tracking, a CRC verdict, ACK and error signaling to the 40 words of transmit plus receive.
-Its final size has not been measured; neither sufficiency nor insufficiency of 64 words is established.
-Instruction capacity remains an open evaluation (section 5).
+A design of that node estimates about 60 words for the node engine and 25 for the line engine, more than one shared page of 64.
+The memory therefore grew to two pages (section 5); the node's measured size is recorded with B8 and B9.
 
 Reproduce every size from the actual uploaded source with `python tools/measure.py`.
 The JSON includes the base commit and SHA-256 of the source files, so uncommitted measurements can be distinguished from the base commit.
@@ -162,7 +163,7 @@ The USB receive enable wastes output pin 12 because G2 reads only the pin space;
 | --- | --- | --- | --- |
 | Engines | 2 | USB, CAN node, Ethernet, UART full duplex use both | Any of those excludes every other protocol |
 | G2 | 1 | CAN receive, USB receive, Ethernet receive | Only one of these at a time |
-| Instruction memory | 64 words | All | Every concurrent combination needs a size check; fuller CAN behavior is unmeasured |
+| Instruction memory | 128 words, two pages of 64 | All | A program is limited to one page; concurrent programs need a size check per page |
 | Clock profile | 1 board clock | Ethernet 40 MHz, USB 48 MHz, CAN 50 MHz | The current Ethernet and USB programs require different clocks |
 
 Concurrent operation of all nine protocols is not a requirement.
@@ -245,17 +246,38 @@ Decision: prototype the acknowledging receiver with the two-pin wiring first, me
 
 ### Instruction memory and storage
 
-| Option | For | Against |
-| --- | --- | --- |
-| 64 words of flip-flops (current) | Verified, routed, simple | 69,500 µm² plus read multiplexers in the earlier estimate; complete CAN capacity is unmeasured |
-| Latch storage (`PE_LATCH_STORE`) | Lower storage area; current total mapped area is 280,354 µm² | Not yet physically verified on CMOS5L; latch gating, duty cycle and falling-edge paths need checks |
-| IHP SRAM macros | Densest for larger sizes | Synchronous read; two engines read every cycle, so a second port or arbitration; macro placement, Metal4 power, precheck |
+Measured with yosys, mapped to the IHP `sg13g2` typical liberty (cell area before placement, whole chip):
 
-Decision: none yet.
-Build and gate-level-test the latch variant, and compare a larger instruction store with available SRAM candidates; choose from routed timing, area and gate-level results, not estimates.
-Doubling instruction words also needs an addressing design: PC, jump targets, wrap bounds, indexed-jump base and Host instruction addresses are currently six bits.
-Simply increasing the storage depth would leave half of it unreachable.
-Evaluate banking versus wider instruction/address encodings, including relocation, Host loading, fetch snooping and cycle behavior, before selecting either.
+| Store | Flip-flops | Latches (`PE_LATCH_STORE`) |
+| --- | --- | --- |
+| 64 words | 332,569 µm² | 280,354 µm² |
+| 128 words | 429,914 µm² (+29%) | 341,332 µm² |
+
+The routed 64-word flip-flop build occupies 48% of the 6x4 allocation, so 128 flip-flop words project to roughly 62%.
+
+| | Current | Proposed (implemented) |
+| --- | --- | --- |
+| Capacity | 64 words shared by both engines | 128 words in two pages of 64 |
+| Addressing | 6-bit PC, jumps, wrap bounds, jump base and `IMEM_ADDR` | Same 6-bit fields within a page; EXECCFG bit 7 selects the engine's page; `IMEM_ADDR` is 7 bits |
+| Storage | Flip-flops | Flip-flops |
+
+Pros:
+
+- A complete CAN node (about 60 plus 25 words estimated) fits, one page per engine, without new instruction formats.
+- Every existing program, encoding and cycle count is unchanged; programs and the assembler stay page-relative.
+- Two programs no longer compete for one 64-word budget, which helps every concurrent combination.
+- Flip-flops keep the verified, routed and gate-level-tested storage.
+
+Cons:
+
+- Significant: about 97,000 µm² more cell area (+29%), the largest single growth so far; routed utilization and timing must be confirmed by a prerelease build.
+- Moderate: a program cannot span pages, so a single program is still limited to 64 words; two engines cannot share code across pages.
+- Minor: after changing an engine's page the Host must force a `jmp`, because the instruction register still holds a word from the old page.
+- Minor: the latch variant would save about 88,600 µm² at 128 words but remains physically unverified on CMOS5L.
+
+Rejected alternatives: a wider PC and jump encoding changes every instruction format and the assembler for a gain that only a single program over 64 words would need; SRAM macros need a second read port or arbitration that changes fetch timing (below).
+
+Decision: 128 flip-flop words in two pages, implemented in this change; revisit latch storage only with a physical build and gate-level tests.
 
 The current store supports one Host write and two independent engine fetches, with same-cycle write forwarding.
 A synchronous SRAM candidate must preserve one issued instruction per enabled tick, stalled and branch fetch behavior, and live-write visibility; otherwise every protocol's timing changes.
@@ -273,7 +295,7 @@ Keep 6x4 until the 8x4 template is confirmed; use 8x4 for measured gains (engine
 2. Publish a prerelease of this source to measure its routed cost against `17995b3`, and continue slow-corner closure at 50 MHz (roadmap milestone 1).
 3. Convert the remaining peers to absolute time (B13) and run each program at its clock profile, so later clock or timing changes are caught.
 4. CAN acknowledgement (B8): two-pin wired-AND prototype, DLC tracking and CRC verdict; measure program size.
-5. Decide instruction capacity and storage with physical builds of the 64-word latch variant and defined larger-store/SRAM candidates.
+5. Done in this change: 128 instruction words in two pages, and G2 emission into either engine; storage stays flip-flops until a latch or SRAM build shows a verified gain.
 6. CAN error signaling (B9), USB keep-alive and reset (B10), PS/2 timeouts (B11).
 7. Ethernet receive margin (B12): a decoder table or clock-profile change, measured with a jitter sweep.
 8. With the 8x4 template: a three-engine and two-G2 experiment against the concurrency targets.
@@ -302,6 +324,6 @@ Two test bugs surfaced and were fixed along the way: the Ethernet driver started
 
 The issue distinguishes completion of this review from completion of the native baseline.
 The review records protocol coverage (section 1), blocking requirements and pin tests (section 2), timeout and record interfaces (section 3), resource and Host measurements (section 4), provisional design choices and experiments (section 5), implementation order (section 6), and outstanding acceptance evidence (section 7).
-The selected implementation remains two engines, one G2, 64 flip-flop instruction words, 6x4 allocation and separate clock profiles; none is a final capacity or operating guarantee.
+The selected implementation remains two engines, one G2, 128 flip-flop instruction words in two pages, 6x4 allocation and separate clock profiles; none is a final capacity or operating guarantee.
 Final engine count, common-clock support and storage technology remain gated by fuller CAN programs, simultaneous peer tests and source-linked physical builds.
 Do not freeze the architecture or mark the baseline complete while those gates or B8-B13 remain open.

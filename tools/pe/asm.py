@@ -40,7 +40,8 @@ MOV_COUNT = {"isrcnt": 0, "osrcnt": 1}  # sources of the count operation (3)
 WAIT_INDEX_LIMIT = {"gpio": 16, "pin": 16, "flag": 8}
 SET_DEST = {"pins": 0, "x": 1, "y": 2, "pindirs": 4}
 
-MEM_SIZE = 64
+PAGE_SIZE = 64   # an engine addresses one page (EXECCFG bit 7)
+MEM_SIZE = 128
 
 
 class AsmError(Exception):
@@ -65,16 +66,22 @@ class Program:
         return len(self.code)
 
     def words(self, offset):
-        """Machine words relocated to load at `offset`."""
-        if offset + len(self.code) > MEM_SIZE:
-            raise AsmError(f"{self.name}: does not fit at offset {offset}")
+        """Machine words relocated to load at memory address `offset` (0-127).
+        A program lies within one page; jump targets are page addresses."""
+        if not 0 <= offset < MEM_SIZE or offset % PAGE_SIZE + len(self.code) > PAGE_SIZE:
+            raise AsmError(f"{self.name}: does not fit in a page at offset {offset}")
         out = list(self.code)
         for i in self.jumps:
             out[i] = (out[i] & ~0x3F) | ((out[i] + offset) & 0x3F)
         return out
 
     def label(self, name, offset=0):
-        return (self.labels[name] + offset) % MEM_SIZE
+        """Page address of a label for a program loaded at `offset`."""
+        return (self.labels[name] + offset) % PAGE_SIZE
+
+    def label_at(self, index, offset=0):
+        """Page address of instruction `index` for a program loaded at `offset`."""
+        return (index + offset) % PAGE_SIZE
 
     def sidepin(self, base):
         """SIDEPIN register value for this program's side-set config."""
@@ -161,8 +168,8 @@ def assemble(text):
             jumps.append(len(code))
         code.append(word)
 
-    if len(code) > MEM_SIZE:
-        raise AsmError(f"{name}: {len(code)} instructions exceed {MEM_SIZE}")
+    if len(code) > PAGE_SIZE:
+        raise AsmError(f"{name}: {len(code)} instructions exceed a page of {PAGE_SIZE}")
 
     return Program(name, code, jumps, labels, wrap_target, wrap, side_count, side_opt,
                    side_pindirs, origin, defines)

@@ -16,7 +16,7 @@ Terms follow `CONTEXT.md`: an **Engine** executes a **Program** that the **Host*
 | Block | Count | Purpose |
 | --- | --- | --- |
 | Host port | 1 | SPI-style target port that the Host uses to reach every register |
-| Instruction memory | 1, shared | 64 instructions of 16 bits, written by the Host, read by both engines every cycle |
+| Instruction memory | 1, shared | 128 instructions of 16 bits in two pages of 64, written by the Host, read by both engines every cycle |
 | Engine | 2 | Executes instructions, with shift registers, scratch registers, buffers, side-set and delay |
 | Buffers | 1 per engine | 8 entries of 16 bits each, usable as transmit queue, receive queue or RAM (G5) |
 | Checksum shift register (G1) | 1 per engine | 32-bit programmable LFSR for CRCs, parity, scramblers and test patterns |
@@ -132,7 +132,7 @@ Multi-byte registers are little-endian.
 | Address | Name | Access | Description |
 | --- | --- | --- | --- |
 | 0x00 | `ID` | R | 0x50 |
-| 0x01 | `VERSION` | R | 0x02: instruction set with timed waits and count reads |
+| 0x01 | `VERSION` | R | 0x03: instruction memory pages and emission into either engine; 0x02 added timed waits and count reads |
 | 0x02 | `CTRL` | RW | Bit 0 enables engine 0, bit 1 enables engine 1 |
 | 0x03 | `CMD` | W | Write 1 to pulse: bit 0 restarts engine 0, bit 1 restarts engine 1, bit 2 steps engine 0, bit 3 steps engine 1, bit 4 clears engine 0 buffers, bit 5 clears engine 1 buffers, bit 6 resets both clock dividers |
 | 0x04 | `FLAGS` | RW | Read the 8 coordination flags; write 1 to clear |
@@ -141,8 +141,8 @@ Multi-byte registers are little-endian.
 | 0x07 | `STICKY` | RW | Error flags; write 1 to clear (see below) |
 | 0x08 | `STICKY_MASK` | RW | Sticky bits that assert `HIRQ` |
 | 0x09 | `HOSTCFG` | RW | Bit 0 `QUAD` |
-| 0x0A | `IMEM_ADDR` | RW | Instruction memory write address, 6 bits |
-| 0x0B | `IMEM_DATA` | W port | Writes one instruction at `IMEM_ADDR`, then increments `IMEM_ADDR` modulo 64 |
+| 0x0A | `IMEM_ADDR` | RW | Instruction memory write address, 7 bits (bit 6 is the page) |
+| 0x0B | `IMEM_DATA` | W port | Writes one instruction at `IMEM_ADDR`, then increments `IMEM_ADDR` modulo 128 |
 | 0x0C | `G2_ADDR` | RW | Bit state machine table write address, 6 bits |
 | 0x0D | `G2_DATA` | W | Writes one table entry at `G2_ADDR`, then increments `G2_ADDR` modulo 64 (8-bit, not a port) |
 | 0x0E | `G2_CTRL` | RW | See bit state machine |
@@ -202,7 +202,7 @@ Offsets are relative to the block base.
 | 0x07 | `SETPIN` | RW | Bits 3:0 base, bits 6:4 count (0-5; 6 and 7 act as 5) |
 | 0x08 | `INPIN` | RW | Bits 3:0 `in` base, bits 7:4 `jmp pin` index |
 | 0x09 | `SIDEPIN` | RW | Bits 3:0 base, bits 5:4 count (0-3), bit 6 optional, bit 7 side-set drives directions |
-| 0x0A | `EXECCFG` | RW | Bits 5:0 jump base (G8), bit 6 `jmp pin` tests the pin pattern instead (G4) |
+| 0x0A | `EXECCFG` | RW | Bits 5:0 jump base (G8), bit 6 `jmp pin` tests the pin pattern instead (G4), bit 7 instruction memory page |
 | 0x0B | `STATUSCFG` | RW | Bits 3:0 level `N`, bit 4 selects the receive queue (1) or transmit queue (0) |
 | 0x0C | `LFSRCFG` | RW | Bits 1:0 feed, bits 3:2 mode, bit 4 shifts right |
 | 0x0D | `CAPCFG` | RW | Bits 3:0 pin, bits 5:4 edge (0 off, 1 rising, 2 falling, 3 both), bit 6 sets a flag |
@@ -502,7 +502,8 @@ The index is `{state[3:0], in1, in0}`.
 | 0 | Enable |
 | 1 | Owner engine |
 | 3:2 | Step mode: 0 every cycle, 1 on each tick of the owner's clock divider (not Host steps or exec slot ticks), 2 when the feed is full, 3 never |
-| 4 | Emit into the owner's ISR |
+| 4 | Emit into an engine's ISR |
+| 5 | Emit into the engine that does not own the bit state machine, instead of the owner |
 
 Input sources (`G2_IN0`, `G2_IN1`): 0-15 the pin space, 16 the feed bit, 17 feed full, others 0.
 
@@ -513,10 +514,13 @@ In step mode 2, every step consumes the feed bit; in other modes the take bit co
 **Feed:** the owner engine's `out g2, n` writes one bit into a 1-bit feed.
 A write is accepted only when the feed is empty, so an engine can hand over at most one bit every 2 cycles.
 
-**Emit:** when the emit bit is set and `G2_CTRL` bit 4 is set, out0 shifts into the owner's ISR one cycle after the step, without any instruction.
+**Emit:** when the emit bit is set and `G2_CTRL` bit 4 is set, out0 shifts into the receiving engine's ISR one cycle after the step, without any instruction.
+The receiving engine is the owner, or the other engine when `G2_CTRL` bit 5 is set.
+One engine can then sample and feed while the other collects the bits, for example a line engine and a protocol engine.
+The rules below apply to the receiving engine.
 It follows the same rules as a 1-bit `in`: direction, count, the checksum feed, and autopush.
 If autopush finds the receive queue full, the word is dropped, the ISR clears, and the receive overflow sticky bit is set; the bit state machine never stalls.
-In a cycle with an emission, an owner instruction that would modify the ISR stalls for that cycle: any `in`, `push`, `mov isr` or `out isr`.
+In a cycle with an emission, a receiving-engine instruction that would modify the ISR stalls for that cycle: any `in`, `push`, `mov isr` or `out isr`.
 If checksum feed bit 1 is set, so that the emission steps the checksum register, a 1-bit `in`, a 1-bit `out` that steps it, and `out lfsr` stall as well.
 
 ## Coordination flags
@@ -526,7 +530,11 @@ Within one cycle, all sets and clears combine, and a set wins over a clear.
 
 ## Instruction memory
 
-64 entries of 16 bits, written only by the Host.
+128 entries of 16 bits in two pages of 64, written only by the Host.
+Each engine fetches from the page in its `EXECCFG` bit 7: PC, jump targets, wrap bounds and the jump base are addresses within that page, so a program never leaves its page.
+Both engines may use the same page.
+The Host addresses all 128 entries through `IMEM_ADDR`.
+After changing an engine's page, the Host must set its PC with a forced `jmp` before the engine runs, because the instruction already fetched at PC came from the old page.
 An instruction issues with the memory contents at the start of its cycle.
 A write takes effect at the end of the cycle that carries it, so every instruction issued after that cycle sees it, also on a running engine.
 

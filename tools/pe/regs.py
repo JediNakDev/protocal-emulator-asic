@@ -28,7 +28,7 @@ COUNTER = 0x16
 PINCFG = 0x20  # PINCFG0..PINCFG12 at 0x20..0x2C
 
 ID_VALUE = 0x50
-VERSION_VALUE = 0x02
+VERSION_VALUE = 0x03
 
 # CMD bits
 CMD_RESTART0 = 1 << 0
@@ -61,6 +61,7 @@ SETPIN = 0x07
 INPIN = 0x08
 SIDEPIN = 0x09
 EXECCFG = 0x0A
+EXECCFG_PAGE1 = 1 << 7   # fetch from instruction memory 64-127
 STATUSCFG = 0x0B
 LFSRCFG = 0x0C
 CAPCFG = 0x0D
@@ -127,6 +128,7 @@ G2_STEP_CYCLE = 0 << 2
 G2_STEP_TICK = 1 << 2
 G2_STEP_FEED = 2 << 2
 G2_EMIT = 1 << 4
+G2_EMIT_OTHER = 1 << 5   # emit into the engine that does not own G2
 G2_SRC_FEED_BIT = 16
 G2_SRC_FEED_FULL = 17
 

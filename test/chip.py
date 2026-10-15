@@ -222,14 +222,17 @@ class Chip:
     async def setup_engine(self, e, prog, offset=0, clkdiv=0, shiftctrl=0, thresh=0,
                            out_base=0, out_count=1, set_base=0, set_count=1, in_base=0,
                            jmp_pin=0, side_base=0, execcfg=0, statuscfg=0):
-        """Configure engine `e` for a loaded Program and jump to its start."""
+        """Configure engine `e` for a loaded Program and jump to its start.
+        `offset` is the memory address (0-127); its page goes to EXECCFG bit 7."""
+        page = offset // 64
         await self.ereg(e, regs.CLKDIV, [clkdiv & 0xFF, clkdiv >> 8,
-                                         prog.wrap_target + offset, prog.wrap + offset])
+                                         prog.label_at(prog.wrap_target, offset),
+                                         prog.label_at(prog.wrap, offset)])
         await self.ereg(e, regs.SHIFTCTRL, [shiftctrl, thresh,
                                             (out_base & 15) | ((out_count & 15) << 4),
                                             (set_base & 15) | ((set_count & 7) << 4),
                                             (in_base & 15) | ((jmp_pin & 15) << 4),
-                                            prog.sidepin(side_base), execcfg, statuscfg])
+                                            prog.sidepin(side_base), execcfg | page << 7, statuscfg])
         await self.write(regs.CMD, regs.CMD_RESTART0 << e)
         await self.force(e, offset & 0x3F)  # jmp to the program start
 
