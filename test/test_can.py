@@ -72,8 +72,8 @@ class CanBus:
             self.chip.set_pin8(level)
 
 
-Tx = namedtuple("Tx", "ident data join ext rtr dlc bad_crc",
-                defaults=(b"", False, False, False, None, False))
+Tx = namedtuple("Tx", "ident data join ext rtr dlc bad_crc error_at",
+                defaults=(b"", False, False, False, None, False, None))
 Rx = namedtuple("Rx", "ident data ok ext rtr dlc")
 
 
@@ -94,9 +94,10 @@ class CanNode:
     while receiving, resynchronizes on recessive-to-dominant edges by up to
     SJW_NS; an edge further than that from its bit boundary is a timing
     violation. Its bit time may differ from the nominal one. A frame to
-    send may carry a wrong CRC (bad_crc) or join a start of frame seen on
-    the bus (join) instead of waiting for the bus to be idle. A frame that
-    loses arbitration is sent again once the bus is idle."""
+    send may carry a wrong CRC (bad_crc), break off with an active error
+    flag at stuffed bit error_at, or join a start of frame seen on the bus
+    (join) instead of waiting for the bus to be idle. A frame that loses
+    arbitration is sent again once the bus is idle."""
 
     def __init__(self, bit_ns=BIT_NS):
         self.bit = bit_ns
@@ -142,6 +143,8 @@ class CanNode:
             if run == 5:
                 out.append(1 - x)
                 last, run = 1 - x, 1
+        if tx.error_at is not None:  # error flag, error delimiter
+            return out[:tx.error_at] + [0] * 6 + [1] * 8
         return out + [1, 1, 1] + [1] * 7
 
     def _begin(self, transmit):
@@ -168,6 +171,9 @@ class CanNode:
             self._drive(1)
 
     def _sample(self, k, b):
+        if self.transmitting and self.tx_frame.error_at is not None and k >= self.tx_frame.error_at:
+            self.done = k == len(self.tx_bits) - 1
+            return
         if self.transmitting and self.stuffed and self.tx_bits[k] != b:
             self.transmitting = False  # become a receiver
             if self.tx_bits[k] and len(self.data_bits) <= self.arb_end:
@@ -293,7 +299,8 @@ async def setup_listen(dut, node, hz=PROFILE):
     await chip.write(regs.G2_DATA, g2lib.can_destuffer())
     await chip.write(regs.G2_IN0, [regs.G2_SRC_FEED_BIT, regs.G2_SRC_FEED_BIT])
     await chip.write(regs.G2_STATE, 0)
-    await chip.write(regs.G2_CTRL, regs.G2_ENABLE | regs.G2_OWNER1 | regs.G2_STEP_FEED | regs.G2_EMIT)
+    await chip.write(regs.G2_CTRL, regs.G2_ENABLE | regs.G2_OWNER1 | regs.G2_STEP_FEED
+                     | regs.G2_EMIT)
     node.attach(CanBus(chip))
     await chip.enable(2)
     return chip
@@ -477,12 +484,13 @@ async def test_can_node_acks(dut):
 
 @cocotb.test()
 async def test_can_node_acks_clock_offset(dut):
-    """...by a transmitter 1.5% slow and one 1.5% fast."""
+    """...by a transmitter 1.5% slow..."""
     await node_acks(dut, BIT_NS * 1.015)
 
 
 @cocotb.test()
 async def test_can_node_acks_clock_offset_fast(dut):
+    """...and one 1.5% fast."""
     await node_acks(dut, BIT_NS * 0.985)
 
 
@@ -497,18 +505,39 @@ async def test_can_node_bad_crc_not_acked(dut):
     frames = await node_frames(chip, 3)
     assert frames == [frame(t, acked=False, crc_ok=False) for t in bad] + [frame(good)], frames
     assert peer.sent == [(0x321, False), (0x1234, False), (0x322, True)], peer.sent
+    assert not peer.violations, peer.violations[:5]
 
 
-async def transmit_session(dut, hz=PROFILE):
+@cocotb.test()
+async def test_can_node_error_recovery(dut):
+    """A frame broken off by an error flag, in the identifier (page 0), in
+    the data (page 1) or in place of the stuff bit after a CRC that is
+    right so far, is not acknowledged; the chip returns to idle and
+    acknowledges the next frame, which begins with a recessive bit."""
+    peer = CanNode()
+    chip = await setup_node(dut, [peer])
+    stuff_after_crc = len(CanNode._frame_bits(Tx(0x104))) - 11
+    broken = [Tx(0x2AA, b"\x12\x34", error_at=6), Tx(0x2AB, b"\x5a" * 8, error_at=40),
+              Tx(0x104, error_at=stuff_after_crc)]
+    good = Tx(0x4AC, b"\x56")
+    peer.pending += broken + [good]
+    frames = await node_frames(chip, 4)
+    assert frames == [None, None, None, frame(good)], frames
+    assert peer.sent == [(0x4AC, True)], peer.sent
+    assert not peer.violations, peer.violations[:5]
+    assert not (await chip.read8(regs.FLAGS)) & 0x40, "flag 6 clear"
+
+
+async def transmit_session(dut, hz=PROFILE, bit_ns=BIT_NS):
     """The chip sends frames, which the peer checks and acknowledges, then
     acknowledges one from the peer."""
-    peer = CanNode()
+    peer = CanNode(bit_ns)
     chip = await setup_node(dut, [peer], hz)
     sent = [Tx(0x456, b"\x11\x22"), Tx(0x1000028, b"\x55", ext=True), Tx(0x104),
             Tx(0x7FF, rtr=True, dlc=8)]
-    for tx in sent:
+    for n, tx in enumerate(sent, 1):
         await node_send(chip, tx.ident, tx.data, ext=tx.ext, rtr=tx.rtr, dlc=tx.dlc)
-        frames = await node_frames(chip, sent.index(tx) + 1)
+        frames = await node_frames(chip, n)
         assert not peer.violations, peer.violations[:5]
     assert frames == [frame(tx) for tx in sent], frames
     assert peer.received == [Rx(t.ident, t.data, True, t.ext, t.rtr, frame(t).dlc)
@@ -523,6 +552,18 @@ async def transmit_session(dut, hz=PROFILE):
 @cocotb.test()
 async def test_can_node_transmit(dut):
     await transmit_session(dut)
+
+
+@cocotb.test()
+async def test_can_node_transmit_clock_offset(dut):
+    """...to and from a node 1.5% slow..."""
+    await transmit_session(dut, bit_ns=BIT_NS * 1.015)
+
+
+@cocotb.test()
+async def test_can_node_transmit_clock_offset_fast(dut):
+    """...and one 1.5% fast."""
+    await transmit_session(dut, bit_ns=BIT_NS * 0.985)
 
 
 @cocotb.test()
@@ -564,8 +605,8 @@ async def test_can_node_wins_arbitration(dut):
     peer.send(0x123 << 18 | 0x5, b"\x01", ext=True, join=True)
     await node_send(chip, 0x123, b"\x02")
     frames = await node_frames(chip, 2)
-    assert frames == [frame(Tx(0x123, b"\x02")), frame(Tx(0x123 << 18 | 0x5, b"\x01", ext=True))], frames
+    ext = Tx(0x123 << 18 | 0x5, b"\x01", ext=True)
+    assert frames == [frame(Tx(0x123, b"\x02")), frame(ext)], frames
     assert peer.lost == [0x123 << 18 | 0x5]
     assert peer.sent == [(0x123 << 18 | 0x5, True)], peer.sent
     assert not peer.violations, peer.violations[:5]
-

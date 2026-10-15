@@ -38,7 +38,8 @@
 ;   While transmitting, Y stays 7 or 9 after the DLC: the count only grows.
 ;   Receiving, the program counts the data bytes and the 15 CRC bits on page
 ;   1, checks the CRC, waits for the CRC delimiter (a stuff bit may come
-;   first) and acknowledges a frame received without error.
+;   first, and a stuff error there ends the frame) and acknowledges a frame
+;   received without error.
 ; An error (pin 14) ends the frame without an error frame: the node waits
 ; 12 bit boundaries and returns to idle.
 .side_set 1 opt
@@ -141,7 +142,8 @@ data:
     set y, 8
 byte:                          ; X data bytes remain, then the CRC
     mov osr, x
-    jmp !x crc
+    jmp x-- field              ; X is reloaded from the OSR after the field
+    set y, 15                  ; the CRC
 field:                         ; a field of Y bits
     mov isr, null
 fbit:
@@ -157,6 +159,7 @@ fbit:
     mov isr, null
 delim:                         ; until the bit after the CRC delimiter begins
     wait 1 flag 1
+    jmp pin eof                ; a stuff error after the CRC
     mov x, isrcnt              ; 0 until the delimiter; a stuff bit is not counted
     jmp !x delim
     jmp y-- eof                ; acknowledgement slot
@@ -168,6 +171,3 @@ eofl:                          ; acknowledgement delimiter, end of frame,
     jmp x-- eofl      side 1
     set page, quiet
     jmp quiet
-crc:
-    set y, 15
-    jmp field

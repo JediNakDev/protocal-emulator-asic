@@ -359,7 +359,8 @@ Keep 6x4 until the 8x4 template is confirmed; use 8x4 for measured gains (engine
 3. Done: every peer keeps absolute time (B13), with a wrong-clock control per protocol.
 4. Done: CAN acknowledgement (B8) by a node program pair across both pages, with no pin sharing; measured at 128 words.
 5. Done in this change: 128 instruction words in two pages, and G2 emission into either engine; storage stays flip-flops until a latch or SRAM build shows a verified gain.
-6. Done: USB keep-alive and reset (B10), PS/2 timeouts (B11). CAN error signaling (B9) waits for the memory decision of section 5.
+6. Done: USB keep-alive and reset (B10), PS/2 timeouts (B11).
+   CAN error signaling (B9) waits for the memory decision of section 5.
 7. Ethernet receive margin (B12): deferred with the options of section 5, measured with a jitter sweep when one is built.
 8. With the 8x4 template: a three-engine and two-G2 experiment against the concurrency targets.
 9. Board workflow and demonstrations (roadmap milestone 3), then freeze (milestone 4).

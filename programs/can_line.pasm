@@ -10,9 +10,10 @@
 ;   machine and the record see the same sample. G2_STATE starts at 0.
 ; Pins: INPIN base = RXD (pin 8); jmp pin = TXD (pin 0, which reads back the
 ;   driven value).
-; Config: push threshold 15, no autopush, `in` shifting left, buffer mode
-;   JOIN_RX; CLKDIV 0; 50 cycles per bit (1 Mbit/s at 50 MHz). Y = N1, which
-;   the Host sets with a forced `set y, 8`; start at `idle`.
+; Config: push threshold 15, no autopush, `in` shifting left, `out`
+;   shifting right, buffer mode JOIN_RX; CLKDIV 0; 50 cycles per bit
+;   (1 Mbit/s at 50 MHz). Y = N1, which the Host sets with a forced
+;   `set y, 8`; start at `idle`.
 ; Receive words: count-terminated records (tools/pe/proto/records.py) of the
 ;   raw (stuffed) bus bits, one record from a start of frame until the bus is
 ;   idle; the last word of a record may hold all 15 bits.
@@ -20,7 +21,9 @@
 ;   which must never be set, as a timer.
 ; Bit timing, t = 0 at the sample point: the start of frame edge
 ;   hard-synchronizes, and a sample is taken 36 cycles (72%) after the edge
-;   that last synchronized it. A recessive-to-dominant edge resynchronizes if
+;   that last resynchronized it, or 33 after the start of frame edge, 35
+;   after it reached the pin: so a start of frame this node sends, which it
+;   sees only through the transceiver, lasts one bit plus the loop delay. A recessive-to-dominant edge resynchronizes if
 ;   it is seen at t = 3..9 (early: the boundary strobe follows it) or at
 ;   t = 14..32 (late: after the strobe at t = 11); one seen at t = 10..13
 ;   counts as seen at 14. An edge caused by this node's own dominant TXD
@@ -35,12 +38,9 @@ close:                         ; end of a record
     in x, 15
     push noblock               ; trailer 0x8000 | bits in the last word
 idle:
-    wait 0 gpio RXD    [2]     ; start of frame (c): hard synchronization
-    jmp resync
-early:                         ; c + 3: an edge before the boundary
-    irq set 1                  ; the next bit begins
-resync:                        ; c + 4, for an edge seen at c
-    set x, N1          [29]    ; next sample at c + 36
+    wait 0 gpio RXD    [1]     ; start of frame (c): hard synchronization,
+resync:                        ; c + 2; c + 5 for an edge seen at c
+    set x, N1          [28]    ; next sample at c + 36 (c + 33)
 bit:
     push iffull noblock        ; t = -2
     out g2, 1                  ; t = -1: the bit state machine steps at 0
@@ -64,4 +64,7 @@ tail:                          ; t = 35
     jmp bit            [1]     ; next sample at t = 50
 other:
     jmp !x tail                ; no edge (t = 34)
-    jmp resync                 ; an edge at c
+    jmp resync         [1]     ; an edge at c
+early:                         ; c + 3: an edge before the boundary
+    irq set 1                  ; the next bit begins
+    jmp resync
