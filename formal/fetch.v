@@ -9,8 +9,9 @@
 // memory). Every input is free: Host register writes, restarts, steps,
 // forced instructions, pins, flags and the bit state machine. From any state
 // where `ir` is the memory word at PC and an empty exec slot leaves `cur`
-// equal to `ir`, the next state is one too. The page (EXECCFG bit 7) is
-// assumed constant: the spec requires a forced `jmp` after changing it. The rest of the engine decodes
+// equal to `ir`, the next state is one too, including across `set page` and
+// the jumps that change the page. A Host write to EXECCFG is assumed absent:
+// the spec requires a forced `jmp` after the Host changes the page. The rest of the engine decodes
 // `cur`, so it executes exactly the word an engine reading the memory in the
 // cycle it issues would.
 module fetch_props (
@@ -45,7 +46,7 @@ module fetch_props (
 
   wire [6:0]  fetch_addr;
   wire [5:0]  pc;
-  wire        page;
+  wire        page, page_wr;
   wire [15:0] ir, cur;
   wire        exec_valid;
 
@@ -96,6 +97,7 @@ module fetch_props (
       .st_cap_ovr  (),
       .f_pc        (pc),
       .f_page      (page),
+      .f_page_wr   (page_wr),
       .f_ir        (ir),
       .f_cur       (cur),
       .f_exec_valid(exec_valid)
@@ -104,12 +106,8 @@ module fetch_props (
   wire inv = (ir == mem[{page, pc}]) && (exec_valid || cur == ir);
 
   reg first = 1'b1;
-  reg page_q;
-  always @(posedge clk) begin
-    first  <= 1'b0;
-    page_q <= page;
-  end
-  always @(*) if (!first) assume (page == page_q);
+  always @(posedge clk) first <= 1'b0;
+  always @(*) assume (!page_wr);
 
   always @(*) begin
     if (first) assume (inv);

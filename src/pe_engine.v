@@ -67,6 +67,7 @@ module pe_engine #(
     // Fetch state for formal/fetch.v
     output wire [5:0]  f_pc,
     output wire        f_page,
+    output wire        f_page_wr,
     output wire [15:0] f_ir,
     output wire [15:0] f_cur,
     output wire        f_exec_valid
@@ -97,7 +98,6 @@ module pe_engine #(
   reg        side_opt, side_dirs;
   reg [5:0]  jmp_base;
   reg        jmp_pat;
-  reg        page;
   reg [3:0]  status_n;
   reg        status_sel;
   reg [1:0]  lfsr_feed, lfsr_mode;
@@ -143,7 +143,6 @@ module pe_engine #(
       side_dirs   <= 1'b0;
       jmp_base    <= 6'd0;
       jmp_pat     <= 1'b0;
-      page        <= 1'b0;
       status_n    <= 4'd0;
       status_sel  <= 1'b0;
       lfsr_feed   <= 2'd0;
@@ -195,7 +194,6 @@ module pe_engine #(
           5'h0A: begin
             jmp_base <= bus_wdata[5:0];
             jmp_pat  <= bus_wdata[6];
-            page     <= bus_wdata[7];
           end
           5'h0B: begin
             status_n   <= bus_wdata[3:0];
@@ -225,6 +223,10 @@ module pe_engine #(
 
   // ======================================================== execution state
   reg [5:0]  pc;
+  // `page` is the page PC addresses; `jpage` the page of the next jump taken,
+  // which `set page` writes. A Host write to EXECCFG bit 7 sets both.
+  reg        page, jpage;
+  wire       page_wr = wr & (off == 5'h0A);
   reg [15:0] ir;   // the instruction memory word at PC, fetched one cycle ahead
   reg [15:0] cur;  // the instruction the next issue runs: the exec slot if full, else `ir`
   reg [15:0] x, y, isr, osr;
@@ -470,7 +472,8 @@ module pe_engine #(
   wire [5:0] pc_seq = (pc == wrap_top) ? wrap_bot : pc + 6'd1;
 
   wire [5:0] next_pc = jumps ? jtarget : pc_seq;
-  assign fetch_addr = {page, next_pc};
+  wire       next_page = jumps ? jpage : page;
+  assign fetch_addr = {next_page, next_pc};
   wire [15:0] fetch_word = (imem_we && imem_waddr == fetch_addr) ? imem_wdata : imem_data;
   wire [15:0] hold_word = (imem_we && imem_waddr == {page, pc}) ? imem_wdata : ir;
 
@@ -485,6 +488,7 @@ module pe_engine #(
 
   // ============================================================ next state
   reg [5:0]  n_pc;
+  reg        n_page, n_jpage;
   reg [15:0] n_ir, n_cur;
   reg [15:0] n_x, n_y, n_isr, n_osr, n_exec_instr;
   reg [4:0]  n_isr_cnt, n_osr_cnt, n_delay;
@@ -499,6 +503,8 @@ module pe_engine #(
 
   always @(*) begin
     n_pc         = pc;
+    n_page       = page;
+    n_jpage      = jpage;
     n_ir         = hold_word;
     n_x          = x;
     n_y          = y;
@@ -703,6 +709,7 @@ module pe_engine #(
               3'd0: n_pin_out = wr_range(pin_out, set_base, set_cnt, {11'd0, instr[4:0]});
               3'd1: n_x = {11'd0, instr[4:0]};
               3'd2: n_y = {11'd0, instr[4:0]};
+              3'd3: n_jpage = instr[0];
               3'd4: n_pin_dir = wr_range(pin_dir, set_base, set_cnt, {11'd0, instr[4:0]});
               default: ;
             endcase
@@ -720,8 +727,9 @@ module pe_engine #(
 
       if (!stall) begin
         if (jumps || !exec_valid) begin
-          n_pc = next_pc;
-          n_ir = fetch_word;
+          n_pc   = next_pc;
+          n_page = next_page;
+          n_ir   = fetch_word;
         end
         n_exec_valid = exec_new;
         n_delay      = exec_new ? 5'd0 : dly;
@@ -757,6 +765,8 @@ module pe_engine #(
   always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       pc         <= 6'd0;
+      page       <= 1'b0;
+      jpage      <= 1'b0;
       ir         <= 16'd0;
       cur        <= 16'd0;
       x          <= 16'd0;
@@ -774,6 +784,8 @@ module pe_engine #(
       lfsr_val   <= 32'd0;
     end else begin
       pc      <= n_pc;
+      page    <= page_wr ? bus_wdata[7] : n_page;
+      jpage   <= page_wr ? bus_wdata[7] : n_jpage;
       ir      <= n_ir;
       x       <= n_x;
       y       <= n_y;
@@ -906,6 +918,7 @@ module pe_engine #(
 `ifdef FORMAL
   assign f_pc = pc;
   assign f_page = page;
+  assign f_page_wr = page_wr;
   assign f_ir = ir;
   assign f_cur = cur;
   assign f_exec_valid = exec_valid;

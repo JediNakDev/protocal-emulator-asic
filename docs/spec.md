@@ -132,7 +132,7 @@ Multi-byte registers are little-endian.
 | Address | Name | Access | Description |
 | --- | --- | --- | --- |
 | 0x00 | `ID` | R | 0x50 |
-| 0x01 | `VERSION` | R | 0x03: instruction memory pages and emission into either engine; 0x02 added timed waits and count reads |
+| 0x01 | `VERSION` | R | 0x03: instruction memory pages, `set page` and emission into either engine; 0x02 added timed waits and count reads |
 | 0x02 | `CTRL` | RW | Bit 0 enables engine 0, bit 1 enables engine 1 |
 | 0x03 | `CMD` | W | Write 1 to pulse: bit 0 restarts engine 0, bit 1 restarts engine 1, bit 2 steps engine 0, bit 3 steps engine 1, bit 4 clears engine 0 buffers, bit 5 clears engine 1 buffers, bit 6 resets both clock dividers |
 | 0x04 | `FLAGS` | RW | Read the 8 coordination flags; write 1 to clear |
@@ -202,7 +202,7 @@ Offsets are relative to the block base.
 | 0x07 | `SETPIN` | RW | Bits 3:0 base, bits 6:4 count (0-5; 6 and 7 act as 5) |
 | 0x08 | `INPIN` | RW | Bits 3:0 `in` base, bits 7:4 `jmp pin` index |
 | 0x09 | `SIDEPIN` | RW | Bits 3:0 base, bits 5:4 count (0-3), bit 6 optional, bit 7 side-set drives directions |
-| 0x0A | `EXECCFG` | RW | Bits 5:0 jump base (G8), bit 6 `jmp pin` tests the pin pattern instead (G4), bit 7 instruction memory page |
+| 0x0A | `EXECCFG` | RW | Bits 5:0 jump base (G8), bit 6 `jmp pin` tests the pin pattern instead (G4), bit 7 instruction memory page: a write sets the page the engine fetches from and the page of its next jump, a read returns the fetch page |
 | 0x0B | `STATUSCFG` | RW | Bits 3:0 level `N`, bit 4 selects the receive queue (1) or transmit queue (0) |
 | 0x0C | `LFSRCFG` | RW | Bits 1:0 feed, bits 3:2 mode, bit 4 shifts right |
 | 0x0D | `CAPCFG` | RW | Bits 3:0 pin, bits 5:4 edge (0 off, 1 rising, 2 falling, 3 both), bit 6 sets a flag |
@@ -428,8 +428,11 @@ A program uses `isrcnt` to learn how many bits of a partial word the ISR holds b
 
 ### `set`
 
-Destinations: 0 `pins` (`SETPIN` range), 1 `x`, 2 `y`, 4 `pindirs`; others do nothing.
+Destinations: 0 `pins` (`SETPIN` range), 1 `x`, 2 `y`, 3 `page`, 4 `pindirs`; others do nothing.
 The 5-bit value is zero-extended.
+
+`set page, v` selects page `v` bit 0 for the next jump the engine takes; bits 4:1 are reserved and must be 0.
+It takes one cycle and does not change the page the engine fetches from: the instructions after it run in the current page until a jump is taken (see [instruction memory](#instruction-memory)).
 
 ## Buffers (G5)
 
@@ -531,10 +534,17 @@ Within one cycle, all sets and clears combine, and a set wins over a clear.
 ## Instruction memory
 
 128 entries of 16 bits in two pages of 64, written only by the Host.
-Each engine fetches from the page in its `EXECCFG` bit 7: PC, jump targets, wrap bounds and the jump base are addresses within that page, so a program never leaves its page.
+Each engine fetches from one page at a time: PC, jump targets, wrap bounds and the jump base are addresses within a page.
+Sequential execution and the wrap stay in the current page.
+Each engine also holds a jump page, which `set page` writes.
+Every jump the engine takes (`jmp`, `out pc`, `mov pc`, and a forced `jmp`) goes to its target in the jump page, which becomes the fetch page.
+So after any taken jump the two pages are equal, and a far jump is `set page, p` followed by a jump.
+A program can therefore span both pages, for example a protocol whose code exceeds 64 words.
 Both engines may use the same page.
+Reset selects page 0 for both.
 The Host addresses all 128 entries through `IMEM_ADDR`.
-After changing an engine's page, the Host must set its PC with a forced `jmp` before the engine runs, because the instruction already fetched at PC came from the old page.
+A Host write to `EXECCFG` sets both pages; it must then set the PC with a forced `jmp` before the engine runs, because the instruction already fetched at PC came from the old page.
+A restart (`CTRL`) does not change either page.
 An instruction issues with the memory contents at the start of its cycle.
 A write takes effect at the end of the cycle that carries it, so every instruction issued after that cycle sees it, also on a running engine.
 

@@ -158,7 +158,7 @@ class Engine:
         self.set_base, self.set_count = 0, 1
         self.in_base, self.jmp_pin = 0, 0
         self.side_base, self.side_count, self.side_opt, self.side_dirs = 0, 0, False, False
-        self.jmp_base, self.jmp_pattern, self.page = 0, False, 0
+        self.jmp_base, self.jmp_pattern = 0, False
         self.status_n, self.status_rx = 0, False
         self.lfsr_feed, self.lfsr_mode, self.lfsr_right = 0, 0, False
         self.cap_pin, self.cap_edge, self.cap_flag_en, self.cap_flag = 0, 0, False, 0
@@ -166,6 +166,8 @@ class Engine:
         self.buf = Buffers()
         # Execution state
         self.pc = 0
+        self.page = 0            # the page PC addresses
+        self.jpage = 0           # the page of the next jump taken (`set page`)
         self.x = self.y = 0
         self.isr = self.isr_count = 0
         self.osr, self.osr_count = 0, 16
@@ -434,6 +436,8 @@ class Engine:
                     x = v
                 elif dst == 2:
                     y = v
+                elif dst == 3:
+                    n["jpage"] = v & 1
                 elif dst == 4:
                     pin_dir = write_range(pin_dir, self.set_base, self.set_cnt(), v)
 
@@ -457,6 +461,7 @@ class Engine:
             if not stall:
                 if jump is not None:
                     n["pc"] = jump
+                    n["page"] = self.jpage
                 elif not self.exec_valid:
                     n["pc"] = self.wrap_bottom if self.pc == self.wrap_top else (self.pc + 1) & 63
                 n["exec_valid"] = exec_new is not None

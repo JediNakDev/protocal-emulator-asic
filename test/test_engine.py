@@ -527,3 +527,59 @@ async def test_instruction_pages(dut):
     await chip.enable(0)
     assert set(await chip.pop(0, 4)) == {5}
     assert set(await chip.pop(1, 4)) == {17}
+
+
+@cocotb.test()
+async def test_page_jumps(dut):
+    """`set page` selects the page of the next jump taken: the instructions
+    after it and a jump not taken stay in the current page, the next taken
+    jump changes page, and a program spans both pages. A Host write to
+    EXECCFG sets the jump page too, and a restart keeps it."""
+    chip = await new_chip(dut)
+    home = await chip.load("""
+        set y, 3
+        in y, 16
+        push
+    done:
+        jmp done
+    """, 0)
+    span = await chip.load("""
+        set y, 1
+        set page, far
+        in y, 16           ; still page 0
+        push
+        jmp !y far         ; not taken: the page stays
+        jmp far            ; address 63, the last of page 0
+    far:
+        set y, 2
+        in y, 16
+        push
+        set page, 0
+        jmp 0
+    """, 58)
+    assert span.address("far", 58) == 64
+    rx = regs.fifo_mode(regs.FIFO_JOIN_RX)
+    await chip.setup_engine(0, span, 58, shiftctrl=rx)
+    await chip.enable(1)
+    await chip.cycles(40)
+    await chip.enable(0)
+    assert await chip.pop(0, 3) == [1, 2, 3]
+    assert (await chip.eread(0, regs.EXECCFG))[0] == 0
+    # A Host page write moves the forced jump to page 1 as well.
+    await chip.ereg(0, regs.EXECCFG, regs.EXECCFG_PAGE1)
+    await chip.force(0, 0)  # jmp 0: address 64
+    assert (await chip.eread(0, regs.EXECCFG))[0] == regs.EXECCFG_PAGE1
+    await chip.enable(1)
+    await chip.cycles(40)
+    await chip.enable(0)
+    assert await chip.pop(0, 2) == [2, 3]
+    # A forced `set page` holds across a restart until the next jump.
+    await chip.force_asm(0, "set page, 1")
+    await chip.write(regs.CMD, regs.CMD_RESTART0)
+    assert (await chip.eread(0, regs.EXECCFG))[0] == 0
+    await chip.force(0, 0)
+    await chip.enable(1)
+    await chip.cycles(40)
+    await chip.enable(0)
+    assert await chip.pop(0, 2) == [2, 3]
+    assert home.label("done") == 3
