@@ -1,11 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 """Host-side low-speed USB software for programs/usb_ls_host.pasm."""
 
+from . import records
+
 PID_OUT, PID_IN, PID_SETUP = 0x1, 0x9, 0xD
 PID_DATA0, PID_DATA1 = 0x3, 0xB
 PID_ACK, PID_NAK, PID_STALL = 0x2, 0xA, 0xE
 
 J, K, SE0 = 2, 1, 0
+
+# Reply deadline in host-program ticks (4 cycles at CLKDIV 3, 8 per bit):
+# the reply must start within 17 bit times of the end of the host's SE0.
+REPLY_DEADLINE = 127
+
+# Bus reset: SE0 for whole units of 12297 ticks, 1.025 ms at 48 MHz.
+RESET_UNIT_TICKS = 12297
+TICK_S = 4 / 48e6
 
 
 def pid_byte(pid):
@@ -65,36 +75,39 @@ def line_states(packet_bits, idle=2):
     return states + [SE0, SE0, J]
 
 
-def command(packet_bits, reply):
-    """Transmit words for one packet: the command word, then line states."""
+def command(packet_bits, reply, deadline=REPLY_DEADLINE):
+    """Transmit words for one packet: the command word, then line states.
+    With `reply`, the program waits up to `deadline` ticks for an answer."""
     states = line_states(packet_bits)
-    assert len(states) <= 256
-    words = [(len(states) - 1) | (int(reply) << 8)]
+    assert len(states) <= 256 and 0 < deadline < 128
+    words = [(len(states) - 1) | ((deadline if reply else 0) << 8)]
     for i in range(0, len(states), 8):
         chunk = states[i:i + 8]
         words.append(sum(s << (2 * j) for j, s in enumerate(chunk)))
     return words
 
 
+def reset(ms=50.0):
+    """Command word for a bus reset: SE0 for at least `ms` milliseconds,
+    then J. The chip drives the device directly, as a root port, for which
+    USB 2.0 section 7.1.7.5 requires at least 50 ms (TDRSTR); the 10 ms
+    TDRST minimum applies to a hub's downstream port."""
+    units = -(-round(ms * 1e-3 / TICK_S) // RESET_UNIT_TICKS)
+    assert 0 < units <= 256
+    return [(units - 1) | 0x8000]
+
+
 def split_records(words):
-    records, cur = [], []
-    for w in words:
-        if w == 0xFFFF:
-            bits = [(x >> (15 - i)) & 1 for x in cur for i in range(16)]
-            while bits and bits[-1] == 0:
-                bits.pop()
-            if bits:
-                bits.pop()  # end marker
-            records.append(bits)
-            cur = []
-        else:
-            cur.append(w)
-    return records
+    """usb_ls_rx receive words -> complete records of bits, one per reply."""
+    return records.split(words)[0]
 
 
 def parse(bits):
-    """Decoded record -> (pid, payload, crc_ok), or None without a SYNC.
+    """Decoded record -> (pid, payload, crc_ok), or None without a SYNC:
+    no reply arrived before the deadline, or it was not a packet.
     Leading ones are idle line before the SYNC."""
+    if bits is None:
+        return None
     i = 0
     while i < len(bits) and bits[i] == 1:
         i += 1

@@ -53,23 +53,43 @@ def can_destuffer():
     sixth equal bit: the end of frame, or a stuff error.
     States: 0 idle, 1-5 a run of c dominant bits, 9-13 a run of c recessive
     bits, 6 after a dominant violation (error flag)."""
+    return build(can_destuffer_rule)
+
+
+def can_destuffer_rule(state, in0, in1):
+    """The rule of can_destuffer, shared with can_line."""
+    b = in0
+    if state == 0:
+        if b:
+            return Step(next=0, out1=1)
+        return Step(next=1, out0=0, emit=True)          # start of frame
+    if state == 6:
+        return Step(next=0 if b else 6, out1=1)
+    level, run = (1, state - 8) if state >= 8 else (0, state)
+    if not 1 <= run <= 5:
+        return Step(next=0, out1=1)                     # unused states
+    if run == 5:
+        if b != level:
+            return Step(next=b * 8 + 1)                  # stuff bit: dropped
+        return Step(next=0 if b else 6, out1=1)          # six equal bits
+    nxt = b * 8 + (run + 1 if b == level else 1)
+    return Step(next=nxt, out0=b, emit=True)
+
+
+def can_line():
+    """CAN bit destuffer for a node that also transmits. in0 = sampled bus
+    bit, fed once per bit; in1 = the node's own TXD at that sample.
+    Emits every data bit and drops stuff bits, like can_destuffer.
+    out0 = the sampled bus bit, on every step, so a program can test the
+    last bit with `jmp pin` whether it was a stuff bit or not.
+    out1 = an error at this bit: six equal bits (end of frame, a stuff error
+    or an error flag), or a bit error, TXD dominant while the bus is recessive.
+    States as in can_destuffer."""
     def rule(state, in0, in1):
-        b = in0
-        if state == 0:
-            if b:
-                return Step(next=0, out1=1)
-            return Step(next=1, out0=0, emit=True)          # start of frame
-        if state == 6:
-            return Step(next=0 if b else 6, out1=1)
-        level, run = (1, state - 8) if state >= 8 else (0, state)
-        if not 1 <= run <= 5:
-            return Step(next=0, out1=1)                     # unused states
-        if run == 5:
-            if b != level:
-                return Step(next=b * 8 + 1)                  # stuff bit: dropped
-            return Step(next=0 if b else 6, out1=1)          # six equal bits
-        nxt = b * 8 + (run + 1 if b == level else 1)
-        return Step(next=nxt, out0=b, emit=True)
+        s = can_destuffer_rule(state, in0, in1)
+        s.out0 = in0
+        s.out1 |= int(in1 == 0 and in0 == 1)
+        return s
     return build(rule)
 
 

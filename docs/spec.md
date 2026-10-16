@@ -16,7 +16,7 @@ Terms follow `CONTEXT.md`: an **Engine** executes a **Program** that the **Host*
 | Block | Count | Purpose |
 | --- | --- | --- |
 | Host port | 1 | SPI-style target port that the Host uses to reach every register |
-| Instruction memory | 1, shared | 64 instructions of 16 bits, written by the Host, read by both engines every cycle |
+| Instruction memory | 1, shared | 128 instructions of 16 bits in two pages of 64, written by the Host, read by both engines every cycle |
 | Engine | 2 | Executes instructions, with shift registers, scratch registers, buffers, side-set and delay |
 | Buffers | 1 per engine | 8 entries of 16 bits each, usable as transmit queue, receive queue or RAM (G5) |
 | Checksum shift register (G1) | 1 per engine | 32-bit programmable LFSR for CRCs, parity, scramblers and test patterns |
@@ -132,7 +132,7 @@ Multi-byte registers are little-endian.
 | Address | Name | Access | Description |
 | --- | --- | --- | --- |
 | 0x00 | `ID` | R | 0x50 |
-| 0x01 | `VERSION` | R | 0x01 |
+| 0x01 | `VERSION` | R | 0x03: instruction memory pages, `set page` and emission into either engine; 0x02 added timed waits and count reads |
 | 0x02 | `CTRL` | RW | Bit 0 enables engine 0, bit 1 enables engine 1 |
 | 0x03 | `CMD` | W | Write 1 to pulse: bit 0 restarts engine 0, bit 1 restarts engine 1, bit 2 steps engine 0, bit 3 steps engine 1, bit 4 clears engine 0 buffers, bit 5 clears engine 1 buffers, bit 6 resets both clock dividers |
 | 0x04 | `FLAGS` | RW | Read the 8 coordination flags; write 1 to clear |
@@ -141,8 +141,8 @@ Multi-byte registers are little-endian.
 | 0x07 | `STICKY` | RW | Error flags; write 1 to clear (see below) |
 | 0x08 | `STICKY_MASK` | RW | Sticky bits that assert `HIRQ` |
 | 0x09 | `HOSTCFG` | RW | Bit 0 `QUAD` |
-| 0x0A | `IMEM_ADDR` | RW | Instruction memory write address, 6 bits |
-| 0x0B | `IMEM_DATA` | W port | Writes one instruction at `IMEM_ADDR`, then increments `IMEM_ADDR` modulo 64 |
+| 0x0A | `IMEM_ADDR` | RW | Instruction memory write address, 7 bits (bit 6 is the page) |
+| 0x0B | `IMEM_DATA` | W port | Writes one instruction at `IMEM_ADDR`, then increments `IMEM_ADDR` modulo 128 |
 | 0x0C | `G2_ADDR` | RW | Bit state machine table write address, 6 bits |
 | 0x0D | `G2_DATA` | W | Writes one table entry at `G2_ADDR`, then increments `G2_ADDR` modulo 64 (8-bit, not a port) |
 | 0x0E | `G2_CTRL` | RW | See bit state machine |
@@ -202,7 +202,7 @@ Offsets are relative to the block base.
 | 0x07 | `SETPIN` | RW | Bits 3:0 base, bits 6:4 count (0-5; 6 and 7 act as 5) |
 | 0x08 | `INPIN` | RW | Bits 3:0 `in` base, bits 7:4 `jmp pin` index |
 | 0x09 | `SIDEPIN` | RW | Bits 3:0 base, bits 5:4 count (0-3), bit 6 optional, bit 7 side-set drives directions |
-| 0x0A | `EXECCFG` | RW | Bits 5:0 jump base (G8), bit 6 `jmp pin` tests the pin pattern instead (G4) |
+| 0x0A | `EXECCFG` | RW | Bits 5:0 jump base (G8), bit 6 `jmp pin` tests the pin pattern instead (G4), bit 7 instruction memory page: a write sets the page the engine fetches from and the page of its next jump, a read returns the fetch page |
 | 0x0B | `STATUSCFG` | RW | Bits 3:0 level `N`, bit 4 selects the receive queue (1) or transmit queue (0) |
 | 0x0C | `LFSRCFG` | RW | Bits 1:0 feed, bits 3:2 mode, bit 4 shifts right |
 | 0x0D | `CAPCFG` | RW | Bits 3:0 pin, bits 5:4 edge (0 off, 1 rising, 2 falling, 3 both), bit 6 sets a flag |
@@ -277,7 +277,7 @@ On each tick:
 1. If the delay counter is not zero, it decrements, and nothing else happens.
 2. Otherwise the engine **issues** an instruction: the exec slot if full, otherwise the instruction at PC.
 3. The instruction either completes or **stalls**.
-   A stalled instruction has no effect except side-set, and issues again on the next tick.
+   A stalled instruction has no effect except side-set, the flag that a first `irq wait` sets, and the X decrement of a timed `wait`; it issues again on the next tick.
 4. On completion, PC moves to the jump target if the instruction jumped.
    Otherwise, an instruction from memory advances PC: to `WRAP_BOTTOM` if PC equals `WRAP_TOP`, else to PC + 1.
    An instruction from the exec slot that does not jump leaves PC unchanged.
@@ -303,7 +303,7 @@ Bits 12:8 are the side-set and delay field in every instruction.
 | Bits 15:13 | Instruction | Bits 7:0 |
 | --- | --- | --- |
 | 00x | `jmp` | Bit 13 and bits 7:6 condition, bits 5:0 address |
-| 010 | `wait` | Bit 7 polarity, bits 6:5 source, bits 4:0 index |
+| 010 | `wait` | Bit 7 polarity, bits 6:5 source, bit 4 timed, bits 3:0 index |
 | 011 | `in` | Bits 7:4 source, bits 3:0 bit count (0 means 16) |
 | 100 | `out` | Bits 7:4 destination, bits 3:0 bit count (0 means 16) |
 | 101 | `push`, `pull`, `irq` | Bits 7:6: 00 `push`, 01 `pull`, 10 `irq`, 11 reserved |
@@ -349,8 +349,29 @@ Bit 0 of the data goes to the base pin.
 | --- | --- | --- |
 | 0 | `gpio n` | Pin `n` (absolute, 0-15) equals the polarity |
 | 1 | `pin n` | Pin `in_base + n` (modulo 16) equals the polarity |
-| 2 | `flag n` | Flag `n` equals the polarity; waiting for 1 clears the flag on completion |
+| 2 | `flag n` | Flag `n` (bits 2:0; bit 3 is ignored) equals the polarity; waiting for 1 clears the flag on completion |
 | 3 | `pattern` | Polarity 1: `(pins & Y) == X`. Polarity 0: they differ (G4) |
+
+#### Timed wait
+
+Bit 4 makes a `gpio`, `pin` or `flag` wait **timed** (`wait 1 gpio 3 timeout`), with X as a count of the checks it may still make.
+Each issue of a timed wait is one check:
+
+1. If X is 0, the wait completes: it has timed out.
+2. Otherwise, if the condition holds, the wait completes and X is unchanged.
+   A satisfied `flag` wait for 1 clears the flag, as without a timeout.
+3. Otherwise X decrements.
+   If X is now 0 the wait completes, timed out; otherwise the wait stalls and checks again on the next tick.
+
+After a timed wait, X is 0 if and only if it timed out, so `jmp !x` selects the timeout path.
+With X = N > 0 at the first check, the wait makes at most N checks, one per tick, and completes on the first check that finds the condition; if that is check k, X becomes N - k + 1.
+The condition is sampled exactly as by an untimed wait, including the 2-cycle input latency of synchronized pins.
+Side-set applies on every check; the delay field applies once, after completion, whatever the outcome.
+X carries over between timed waits, so they can reuse a remaining failed-check budget.
+Successful checks, delays and intervening instructions do not decrement X; this is not a shared wall-clock deadline across multiple waits.
+Once X reaches 0, each further timed wait completes at its first check.
+A timed wait on a disabled engine's exec slot checks once per cycle, like any forced instruction that stalls.
+Timed `pattern` waits are reserved, since the pattern uses X; they execute as `nop`.
 
 ### `in`
 
@@ -397,13 +418,21 @@ If one source sets a flag and another clears it in the same cycle, the set wins.
 
 Destinations: 0 `pins`, 1 `x`, 2 `y`, 3 `pindirs`, 4 `exec`, 5 `pc`, 6 `isr` (count becomes 0), 7 `osr` (count becomes 0, meaning full).
 Sources: 0 `pins`, 1 `x`, 2 `y`, 3 `null`, 4 `status`, 5 `isr`, 6 `osr`, 7 `ram` (entry `Y[2:0]`).
-Operations: 0 none, 1 invert (`~`), 2 bit-reverse (`::`), 3 none.
+Operations: 0 none, 1 invert (`~`), 2 bit-reverse (`::`), 3 count.
 `status` is all ones if the selected queue's level is below `N`, else all zeros.
+
+Operation 3 reads a count instead of the source register: source 0 is the ISR count (`mov x, isrcnt`, 0-16) and source 1 the OSR count (`mov x, osrcnt`, 0-16, where 16 means empty); sources 2-7 read 0 and are reserved for further counts.
+The value is the count at the start of the cycle, before any G2 emission in the same cycle.
+Reading a count does not change it.
+A program uses `isrcnt` to learn how many bits of a partial word the ISR holds before pushing it, for example to close a record with its exact length (see [record framing](protocols.md#record-framing)).
 
 ### `set`
 
-Destinations: 0 `pins` (`SETPIN` range), 1 `x`, 2 `y`, 4 `pindirs`; others do nothing.
+Destinations: 0 `pins` (`SETPIN` range), 1 `x`, 2 `y`, 3 `page`, 4 `pindirs`; others do nothing.
 The 5-bit value is zero-extended.
+
+`set page, v` selects page `v` bit 0 for the next jump the engine takes; bits 4:1 are reserved and must be 0.
+It takes one cycle and does not change the page the engine fetches from: the instructions after it run in the current page until a jump is taken (see [instruction memory](#instruction-memory)).
 
 ## Buffers (G5)
 
@@ -476,7 +505,8 @@ The index is `{state[3:0], in1, in0}`.
 | 0 | Enable |
 | 1 | Owner engine |
 | 3:2 | Step mode: 0 every cycle, 1 on each tick of the owner's clock divider (not Host steps or exec slot ticks), 2 when the feed is full, 3 never |
-| 4 | Emit into the owner's ISR |
+| 4 | Emit into an engine's ISR |
+| 5 | Emit into the engine that does not own the bit state machine, instead of the owner |
 
 Input sources (`G2_IN0`, `G2_IN1`): 0-15 the pin space, 16 the feed bit, 17 feed full, others 0.
 
@@ -487,10 +517,13 @@ In step mode 2, every step consumes the feed bit; in other modes the take bit co
 **Feed:** the owner engine's `out g2, n` writes one bit into a 1-bit feed.
 A write is accepted only when the feed is empty, so an engine can hand over at most one bit every 2 cycles.
 
-**Emit:** when the emit bit is set and `G2_CTRL` bit 4 is set, out0 shifts into the owner's ISR one cycle after the step, without any instruction.
+**Emit:** when the emit bit is set and `G2_CTRL` bit 4 is set, out0 shifts into the receiving engine's ISR one cycle after the step, without any instruction.
+The receiving engine is the owner, or the other engine when `G2_CTRL` bit 5 is set.
+One engine can then sample and feed while the other collects the bits, for example a line engine and a protocol engine.
+The rules below apply to the receiving engine.
 It follows the same rules as a 1-bit `in`: direction, count, the checksum feed, and autopush.
 If autopush finds the receive queue full, the word is dropped, the ISR clears, and the receive overflow sticky bit is set; the bit state machine never stalls.
-In a cycle with an emission, an owner instruction that would modify the ISR stalls for that cycle: any `in`, `push`, `mov isr` or `out isr`.
+In a cycle with an emission, a receiving-engine instruction that would modify the ISR stalls for that cycle: any `in`, `push`, `mov isr` or `out isr`.
 If checksum feed bit 1 is set, so that the emission steps the checksum register, a 1-bit `in`, a 1-bit `out` that steps it, and `out lfsr` stall as well.
 
 ## Coordination flags
@@ -500,7 +533,19 @@ Within one cycle, all sets and clears combine, and a set wins over a clear.
 
 ## Instruction memory
 
-64 entries of 16 bits, written only by the Host.
+128 entries of 16 bits in two pages of 64, written only by the Host.
+Each engine fetches from one page at a time: PC, jump targets, wrap bounds and the jump base are addresses within a page.
+Sequential execution and the wrap stay in the current page.
+The wrap therefore applies at `WRAP_TOP` in whichever page the engine runs, so a program spanning both pages must not fall through the instruction at that address in the other page; the assembler rejects one that would.
+Each engine also holds a jump page, which `set page` writes.
+Every jump the engine takes (`jmp`, `out pc`, `mov pc`, and a forced `jmp`) goes to its target in the jump page, which becomes the fetch page.
+So after any taken jump the two pages are equal, and a far jump is `set page, p` followed by a jump.
+A program can therefore span both pages, for example a protocol whose code exceeds 64 words.
+Both engines may use the same page.
+Reset selects page 0 for both.
+The Host addresses all 128 entries through `IMEM_ADDR`.
+A Host write to `EXECCFG` sets both pages; it must then set the PC with a forced `jmp` before the engine runs, because the instruction already fetched at PC came from the old page.
+A restart (`CMD` bits 0-1) does not change either page.
 An instruction issues with the memory contents at the start of its cycle.
 A write takes effect at the end of the cycle that carries it, so every instruction issued after that cycle sees it, also on a running engine.
 

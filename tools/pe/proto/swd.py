@@ -2,17 +2,7 @@
 """Host-side SWD driver for programs/swd.pasm (ARM ADIv5 wire protocol)."""
 
 ACK_OK, ACK_WAIT, ACK_FAULT = 0b001, 0b010, 0b100
-
-DRIVE = 1 << 5
-READ = 1 << 4
-
-
-def _write(nbits, value):
-    return [(nbits - 1) | DRIVE, value & 0xFFFF]
-
-
-def _read(nbits, drive=False):
-    return [(nbits - 1) | READ | (DRIVE if drive else 0)]
+ACK_NONE = 0b111  # nobody drove SWDIO: the pull-up reads ones
 
 
 def parity(v):
@@ -31,57 +21,52 @@ class Batch:
 
     def __init__(self):
         self.tx = []
-        self.reads = []  # per read command: number of bits
-        self.ops = []    # (kind, index of first read word)
+        self.ops = []  # "read" or "write", per transaction
 
-    def _rd(self, nbits, drive=False):
-        self.tx += _read(nbits, drive)
-        self.reads.append(nbits)
-        return len(self.reads) - 1
+    def sequence(self, nbits, value):
+        """Drive nbits (1-16) of value, first bit lowest."""
+        assert 1 <= nbits <= 16
+        self.tx += [(nbits - 1) << 1, value & 0xFFFF]
 
     def line_reset(self):
         """At least 50 ones, then two idle cycles."""
         for _ in range(4):
-            self.tx += _write(16, 0xFFFF)
-        self.tx += _write(2, 0)
+            self.sequence(16, 0xFFFF)
+        self.idle()
 
     def idle(self, n=2):
-        self.tx += _write(n, 0)
+        self.sequence(n, 0)
+
+    def transaction(self, req, read, value=0):
+        """Any request byte, for example one with bad parity."""
+        self.tx.append(1 | (req & 0xFF) << 1 | int(read) << 9)
+        if not read:
+            self.tx += [value & 0xFFFF, value >> 16, parity(value)]
+        self.ops.append("read" if read else "write")
 
     def read(self, apndp, addr):
-        self.tx += _write(8, request(apndp, 1, addr))
-        first = self._rd(1)       # turnaround
-        self._rd(3)               # ACK
-        self._rd(16)              # data[15:0]
-        self._rd(16)              # data[31:16]
-        self._rd(1)               # parity
-        self._rd(1)               # turnaround back to the host
+        self.transaction(request(apndp, 1, addr), True)
         self.idle()
-        self.ops.append(("read", first))
 
     def write(self, apndp, addr, value):
-        self.tx += _write(8, request(apndp, 0, addr))
-        first = self._rd(1)       # turnaround
-        self._rd(3)               # ACK
-        self._rd(1)               # turnaround back to the host
-        self.tx += _write(16, value & 0xFFFF)
-        self.tx += _write(16, value >> 16)
-        self.tx += _write(1, parity(value))
+        self.transaction(request(apndp, 0, addr), False, value)
         self.idle()
-        self.ops.append(("write", first))
-
-    def n_rx_words(self):
-        return len(self.reads)
 
     def decode(self, rx):
-        """Per operation: (ack, data, parity_ok) for reads, (ack,) for writes."""
-        vals = [w >> (16 - n) for w, n in zip(rx, self.reads)]
-        out = []
-        for kind, i in self.ops:
-            ack = vals[i + 1]
-            if kind == "read":
-                data = vals[i + 2] | vals[i + 3] << 16
-                out.append((ack, data, parity(data) == vals[i + 4]))
+        """Per transaction: (ack, data, parity_ok) for a read with ACK OK,
+        (ack,) otherwise. Returns (results, number of words used)."""
+        out, i = [], 0
+        for kind in self.ops:
+            if i >= len(rx):
+                break
+            ack = (rx[i] >> 13) & 7
+            i += 1
+            if kind == "read" and ack == ACK_OK:
+                if i + 3 > len(rx):
+                    break
+                data = rx[i] | rx[i + 1] << 16
+                out.append((ack, data, parity(data) == rx[i + 2] >> 15))
+                i += 3
             else:
                 out.append((ack,))
-        return out
+        return out, i

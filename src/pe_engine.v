@@ -29,11 +29,12 @@ module pe_engine #(
     input  wire        fifo_clear,
     input  wire        div_sync,
     input  wire [2:0]  dbg_sel,
-    // Instruction memory: one read port, and the Host write port for snooping
-    output wire [5:0]  fetch_addr,
+    // Instruction memory: one read port in this engine's page, and the Host
+    // write port for snooping
+    output wire [6:0]  fetch_addr,
     input  wire [15:0] imem_data,
     input  wire        imem_we,
-    input  wire [5:0]  imem_waddr,
+    input  wire [6:0]  imem_waddr,
     input  wire [15:0] imem_wdata,
     // Pins
     input  wire [15:0] pins_in,
@@ -65,6 +66,8 @@ module pe_engine #(
     ,
     // Fetch state for formal/fetch.v
     output wire [5:0]  f_pc,
+    output wire        f_page,
+    output wire        f_page_wr,
     output wire [15:0] f_ir,
     output wire [15:0] f_cur,
     output wire        f_exec_valid
@@ -220,6 +223,10 @@ module pe_engine #(
 
   // ======================================================== execution state
   reg [5:0]  pc;
+  // `page` is the page PC addresses; `jpage` the page of the next jump taken,
+  // which `set page` writes. A Host write to EXECCFG bit 7 sets both.
+  reg        page, jpage;
+  wire       page_wr = wr & (off == 5'h0A);
   reg [15:0] ir;   // the instruction memory word at PC, fetched one cycle ahead
   reg [15:0] cur;  // the instruction the next issue runs: the exec slot if full, else `ir`
   reg [15:0] x, y, isr, osr;
@@ -393,9 +400,12 @@ module pe_engine #(
       3'd7: mov_src = ram_rdata_e;
       default: mov_src = 16'h0000;
     endcase
+    // Operation 3 reads a count instead: source 0 the ISR count, 1 the OSR
+    // count, others 0.
     case (instr[4:3])
       2'd1: mov_val = ~mov_src;
       2'd2: mov_val = rev16(mov_src);
+      2'd3: mov_val = (instr[2:1] != 2'b00) ? 16'h0000 : {11'd0, instr[0] ? osr_cnt : isr_cnt};
       default: mov_val = mov_src;
     endcase
   end
@@ -461,9 +471,11 @@ module pe_engine #(
   wire [5:0] jtarget = out_pc ? (jmp_base + out_data[5:0]) : mov_pc ? mov_val[5:0] : instr[5:0];
   wire [5:0] pc_seq = (pc == wrap_top) ? wrap_bot : pc + 6'd1;
 
-  assign fetch_addr = jumps ? jtarget : pc_seq;
+  wire [5:0] next_pc = jumps ? jtarget : pc_seq;
+  wire       next_page = jumps ? jpage : page;
+  assign fetch_addr = {next_page, next_pc};
   wire [15:0] fetch_word = (imem_we && imem_waddr == fetch_addr) ? imem_wdata : imem_data;
-  wire [15:0] hold_word = (imem_we && imem_waddr == pc) ? imem_wdata : ir;
+  wire [15:0] hold_word = (imem_we && imem_waddr == {page, pc}) ? imem_wdata : ir;
 
   // An emission conflicts with instructions that modify the ISR or step the
   // checksum register; they stall for that cycle.
@@ -476,6 +488,7 @@ module pe_engine #(
 
   // ============================================================ next state
   reg [5:0]  n_pc;
+  reg        n_page, n_jpage;
   reg [15:0] n_ir, n_cur;
   reg [15:0] n_x, n_y, n_isr, n_osr, n_exec_instr;
   reg [4:0]  n_isr_cnt, n_osr_cnt, n_delay;
@@ -490,6 +503,8 @@ module pe_engine #(
 
   always @(*) begin
     n_pc         = pc;
+    n_page       = page;
+    n_jpage      = jpage;
     n_ir         = hold_word;
     n_x          = x;
     n_y          = y;
@@ -543,8 +558,19 @@ module pe_engine #(
               2'd2: wcond = flags[instr[2:0]];
               default: wcond = pat_match;
             endcase
-            if (wcond != instr[7]) stall = 1'b1;
-            else if (instr[6:5] == 2'd2 && instr[7]) flag_clr[instr[2:0]] = 1'b1;
+            // Bit 4 makes the wait timed, with X counting the checks left;
+            // X is 0 afterwards only if it timed out. A timed pattern wait
+            // is reserved, since the pattern uses X.
+            if (instr[4] && instr[6:5] == 2'd3) begin
+              // reserved: nop
+            end else if (instr[4] && x == 16'd0) begin
+              // timed out before this check
+            end else if (wcond != instr[7]) begin
+              if (instr[4]) n_x = x - 16'd1;
+              if (!instr[4] || x != 16'd1) stall = 1'b1;
+            end else if (instr[6:5] == 2'd2 && instr[7]) begin
+              flag_clr[instr[2:0]] = 1'b1;
+            end
           end
 
           OP_IN: begin
@@ -683,6 +709,7 @@ module pe_engine #(
               3'd0: n_pin_out = wr_range(pin_out, set_base, set_cnt, {11'd0, instr[4:0]});
               3'd1: n_x = {11'd0, instr[4:0]};
               3'd2: n_y = {11'd0, instr[4:0]};
+              3'd3: n_jpage = instr[0];
               3'd4: n_pin_dir = wr_range(pin_dir, set_base, set_cnt, {11'd0, instr[4:0]});
               default: ;
             endcase
@@ -700,8 +727,9 @@ module pe_engine #(
 
       if (!stall) begin
         if (jumps || !exec_valid) begin
-          n_pc = fetch_addr;
-          n_ir = fetch_word;
+          n_pc   = next_pc;
+          n_page = next_page;
+          n_ir   = fetch_word;
         end
         n_exec_valid = exec_new;
         n_delay      = exec_new ? 5'd0 : dly;
@@ -737,6 +765,8 @@ module pe_engine #(
   always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       pc         <= 6'd0;
+      page       <= 1'b0;
+      jpage      <= 1'b0;
       ir         <= 16'd0;
       cur        <= 16'd0;
       x          <= 16'd0;
@@ -754,6 +784,8 @@ module pe_engine #(
       lfsr_val   <= 32'd0;
     end else begin
       pc      <= n_pc;
+      page    <= page_wr ? bus_wdata[7] : n_page;
+      jpage   <= page_wr ? bus_wdata[7] : n_jpage;
       ir      <= n_ir;
       x       <= n_x;
       y       <= n_y;
@@ -855,7 +887,7 @@ module pe_engine #(
         5'h07: bus_rdata = {1'b0, set_cnt_r, set_base};
         5'h08: bus_rdata = {jmp_pin, in_base};
         5'h09: bus_rdata = {side_dirs, side_opt, side_cnt, side_base};
-        5'h0A: bus_rdata = {1'b0, jmp_pat, jmp_base};
+        5'h0A: bus_rdata = {page, jmp_pat, jmp_base};
         5'h0B: bus_rdata = {3'b000, status_sel, status_n};
         5'h0C: bus_rdata = {3'b000, lfsr_right, lfsr_mode, lfsr_feed};
         5'h0D: bus_rdata = {1'b0, cap_flag_en, cap_edge, cap_pin};
@@ -885,6 +917,8 @@ module pe_engine #(
 
 `ifdef FORMAL
   assign f_pc = pc;
+  assign f_page = page;
+  assign f_page_wr = page_wr;
   assign f_ir = ir;
   assign f_cur = cur;
   assign f_exec_valid = exec_valid;

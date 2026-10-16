@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
-"""JTAG controller program against an independent IEEE 1149.1 TAP model."""
+"""JTAG controller program against an independent IEEE 1149.1 TAP model,
+in absolute time at the 50 MHz clock profile."""
 
 import cocotb
-from cocotb.triggers import RisingEdge
 
-from chip import Chip, regs
+from chip import MHZ_50, Chip, fails_at_wrong_clock, regs
 from pe.proto.jtag import Scan
+from peers import Wave, clock_violations, now_ns, setup_hold_violations, sleep_ns
+
+PROFILE = MHZ_50
+TCK_HZ = 6_250_000  # 8 cycles per TCK at CLKDIV 0
 
 TDI, TMS, TCK, TDO_PIN = 0, 1, 2, 9
 
@@ -26,10 +30,17 @@ TAP = {
 
 class TapModel:
     """A target with a 4-bit IR, IDCODE, BYPASS and an 8-bit scratch register.
-    Samples TMS/TDI on TCK rising, changes TDO on TCK falling."""
+    Samples TMS/TDI on TCK rising and changes TDO `tco_ns` after TCK falls.
+    `check()` reports TCK periods off the nominal rate and TMS or TDI
+    setup or hold times below 10 ns."""
 
-    def __init__(self, chip):
+    def __init__(self, chip, tco_ns=10.0):
         self.chip = chip
+        self.tco_ns = tco_ns
+        self.tck = Wave(chip.dut.uio_in, TCK)
+        self.tms = Wave(chip.dut.uio_in, TMS)
+        self.tdi = Wave(chip.dut.uio_in, TDI)
+        self.rises = []
         self.state = "TLR"
         self.ir = IR_IDCODE
         self.scratch = 0xC3
@@ -59,25 +70,30 @@ class TapModel:
         elif self.state == "UDR" and self.ir == IR_SCRATCH:
             self.scratch = self.sr & 0xFF
         if self.state in ("SDR", "SIR"):
-            self.chip.set_pin9(self.sr & 1)
+            cocotb.start_soon(self._tdo_later(self.sr & 1))
 
-    async def run(self, clk):
-        prev = 0
+    async def _tdo_later(self, bit):
+        await sleep_ns(self.tco_ns)
+        self.chip.set_pin9(bit)
+
+    async def run(self):
         while True:
-            await RisingEdge(clk)
-            v = self.chip.uio()
-            tck = (v >> TCK) & 1
-            if tck and not prev:
+            if await self.tck.change():
                 self.tck_rises += 1
-                self._rise((v >> TMS) & 1, (v >> TDI) & 1)
-            elif prev and not tck:
+                self.rises.append(now_ns())
+                self._rise(self.tms.read(), self.tdi.read())
+            else:
                 self._fall()
-            prev = tck
+
+    def check(self):
+        out, checked = clock_violations(self.tck, True, TCK_HZ)
+        assert checked, "no TCK period to check"
+        out += setup_hold_violations(self.tms, self.rises, 10, 10, "TMS")
+        return out + setup_hold_violations(self.tdi, self.rises, 10, 10, "TDI")
 
 
-@cocotb.test()
-async def test_jtag_idcode_ir_dr_bypass(dut):
-    chip = Chip(dut)
+async def jtag_session(dut, hz=PROFILE):
+    chip = Chip(dut, hz)
     await chip.start()
     await chip.set_quad()
     prog = await chip.load_program("jtag")
@@ -89,7 +105,7 @@ async def test_jtag_idcode_ir_dr_bypass(dut):
     for p in (TDI, TMS, TCK):
         await chip.pincfg(p, regs.DRIVE_PUSH_PULL)
     tap = TapModel(chip)
-    cocotb.start_soon(tap.run(dut.clk))
+    cocotb.start_soon(tap.run())
 
     scan = Scan()
     scan.reset()
@@ -110,3 +126,16 @@ async def test_jtag_idcode_ir_dr_bypass(dut):
     assert bypass == 0b0110, bin(bypass)  # one-cycle delay through BYPASS
     assert tap.state == "RTI"
     assert tap.tck_rises == len(scan.words()) * 8
+    violations = tap.check()
+    assert not violations, violations[:5]
+
+
+@cocotb.test()
+async def test_jtag_idcode_ir_dr_bypass(dut):
+    await jtag_session(dut)
+
+
+@cocotb.test()
+async def test_jtag_wrong_clock(dut):
+    msg = await fails_at_wrong_clock(lambda hz: jtag_session(dut, hz), PROFILE)
+    assert "timing: clock period" in msg, msg

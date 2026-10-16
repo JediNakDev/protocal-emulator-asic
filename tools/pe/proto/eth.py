@@ -3,6 +3,8 @@
 
 import zlib
 
+from . import records
+
 PREAMBLE_SFD = bytes([0x55] * 7 + [0xD5])
 
 
@@ -20,14 +22,10 @@ def tx_words(wire_bytes):
     return [bits - 1] + [data[i] | data[i + 1] << 8 for i in range(0, len(data), 2)]
 
 
-def record_bits(words):
-    """Bits of one receive record, without the end marker and padding."""
-    bits = [(w >> (15 - i)) & 1 for w in words for i in range(16)]
-    while bits and bits[-1] == 0:
-        bits.pop()
-    if bits:
-        bits.pop()
-    return bits
+def split_records(words):
+    """eth10_rx receive words -> (records of bits, words of an unfinished
+    record). See tools/pe/proto/records.py."""
+    return records.split(words)
 
 
 def parse(bits):

@@ -59,7 +59,7 @@ module tt_um_jedinakdev_protocol_emulator (
   wire        div_sync;
   wire [2:0]  dbg_sel;
   wire        imem_we;
-  wire [5:0]  imem_addr;
+  wire [6:0]  imem_addr;
   wire [15:0] imem_wdata;
   wire [7:0]  flags;
   wire [7:0]  e0_fset, e0_fclr, e1_fset, e1_fclr;
@@ -101,7 +101,7 @@ module tt_um_jedinakdev_protocol_emulator (
   );
 
   // ----------------------------------------------------- instruction memory
-  wire [5:0]  fetch0, fetch1;
+  wire [6:0]  fetch0, fetch1;
   wire [15:0] instr0, instr1;
 
   pe_imem u_imem (

@@ -18,6 +18,8 @@ evaluates, and the registers update at the closing edge.
 
 M16 = 0xFFFF
 M32 = 0xFFFFFFFF
+PAGE_SIZE = 64   # instruction memory page: PC, jump targets and wrap bounds
+MEM_SIZE = 2 * PAGE_SIZE
 
 # Opcodes, bits 15:13
 JMP0, JMP1, WAIT, IN, OUT, CTRL, MOV, SET = range(8)
@@ -151,7 +153,7 @@ class Engine:
         # Configuration (engine registers), as reset
         self.clkdiv = 0
         self.wrap_bottom = 0
-        self.wrap_top = 63
+        self.wrap_top = PAGE_SIZE - 1
         self.autopush = self.autopull = self.in_right = self.out_right = False
         self.push_thresh = self.pull_thresh = 0  # 4-bit fields; 0 means 16
         self.out_base, self.out_count = 0, 1     # count 0 means 16
@@ -166,6 +168,8 @@ class Engine:
         self.buf = Buffers()
         # Execution state
         self.pc = 0
+        self.page = 0            # the page PC addresses
+        self.jpage = 0           # the page of the next jump taken (`set page`)
         self.x = self.y = 0
         self.isr = self.isr_count = 0
         self.osr, self.osr_count = 0, 16
@@ -193,7 +197,7 @@ class Engine:
         return self.osr_count >= self.pull_thr()
 
     def next_instruction(self, imem):
-        return self.exec_instr if self.exec_valid else imem[self.pc]
+        return self.exec_instr if self.exec_valid else imem[self.page * PAGE_SIZE + self.pc]
 
     def side_fields(self, sd):
         """(side-set enabled, value, delay) from instruction bits 12:8."""
@@ -245,6 +249,7 @@ class Engine:
             stall = False
             jump = None
             exec_new = None
+            timed_x = None  # X after a failing check of a timed wait
 
             in_steps = op == IN and one_bit and self.lfsr_feed & 2
             out_steps = op == OUT and one_bit and self.lfsr_feed & 1 and f != OUT_LFSR
@@ -274,10 +279,11 @@ class Engine:
                 else:
                     taken = not self.osr_empty()
                 if taken:
-                    jump = instr & 63
+                    jump = instr % PAGE_SIZE
             elif op == WAIT:
                 pol = _bit(instr, 7)
                 src = (instr >> 5) & 3
+                timed = bool(_bit(instr, 4))
                 if src == 0:
                     v = _bit(pins, instr & 15)
                 elif src == 1:
@@ -286,8 +292,19 @@ class Engine:
                     v = _bit(chip.flags, instr & 7)
                 else:
                     v = int((pins & self.y) == self.x)
-                if v != pol:
-                    stall = True
+                if timed and src == 3:
+                    pass  # reserved: a timed pattern wait is a nop
+                elif timed and self.x == 0:
+                    pass  # timed out: completes without checking
+                elif v != pol:
+                    if timed:
+                        # Each failing check uses up one; the check that
+                        # reaches 0 completes. The decrement survives a stall.
+                        timed_x = (self.x - 1) & M16
+                        x = timed_x
+                        stall = timed_x != 0
+                    else:
+                        stall = True
                 elif src == 2 and pol:
                     e["flag_clr"] |= 1 << (instr & 7)
             elif op == IN:
@@ -333,7 +350,7 @@ class Engine:
                     elif f == OUT_PINDIRS:
                         pin_dir = write_range(pin_dir, self.out_base, _count(self.out_count, 16), data)
                     elif f == OUT_PC:
-                        jump = (self.jmp_base + data) & 63
+                        jump = (self.jmp_base + data) % PAGE_SIZE
                     elif f == OUT_ISR:
                         isr, isr_count = data, nb
                     elif f == OUT_EXEC:
@@ -391,7 +408,11 @@ class Engine:
                 else:
                     src = {0: pins_rot, 1: self.x, 2: self.y, 3: 0, 5: self.isr, 6: self.osr, 7: b.mem[self.y & 7]}[srcsel]
                 o = (instr >> 3) & 3
-                v = (~src & M16) if o == 1 else _rev16(src) if o == 2 else src
+                if o == 3:
+                    # Count operation: the source field picks a count instead.
+                    v = {0: self.isr_count, 1: self.osr_count}.get(srcsel, 0)
+                else:
+                    v = (~src & M16) if o == 1 else _rev16(src) if o == 2 else src
                 dst = (instr >> 5) & 7
                 if dst == 0:
                     pin_out = write_range(pin_out, self.out_base, _count(self.out_count, 16), v)
@@ -404,7 +425,7 @@ class Engine:
                 elif dst == 4:
                     exec_new = v
                 elif dst == 5:
-                    jump = v & 63
+                    jump = v % PAGE_SIZE
                 elif dst == 6:
                     isr, isr_count = v, 0
                 else:
@@ -417,6 +438,8 @@ class Engine:
                     x = v
                 elif dst == 2:
                     y = v
+                elif dst == 3:
+                    n["jpage"] = v & 1
                 elif dst == 4:
                     pin_dir = write_range(pin_dir, self.set_base, self.set_cnt(), v)
 
@@ -424,11 +447,14 @@ class Engine:
             side_en, side_val, dly = self.side_fields((instr >> 8) & 31)
             n["stalled"] = stall
             if stall:
-                # A stalled instruction has no effect except side-set, and the
-                # flag that a first `irq wait` sets before waiting.
+                # A stalled instruction has no effect except side-set, the
+                # flag that a first `irq wait` sets before waiting, and the X
+                # decrement of a timed wait.
                 x, y, isr, isr_count, osr, osr_count, lfsr = self.x, self.y, self.isr, self.isr_count, self.osr, self.osr_count, self.lfsr
                 pin_out, pin_dir = self.pin_out, self.pin_dir
                 tx_pop, rx_push, ram_write = False, None, None
+                if timed_x is not None:
+                    x = timed_x
             if side_en:
                 if self.side_dirs:
                     pin_dir = write_range(pin_dir, self.side_base, self.side_count, side_val)
@@ -437,8 +463,9 @@ class Engine:
             if not stall:
                 if jump is not None:
                     n["pc"] = jump
+                    n["page"] = self.jpage
                 elif not self.exec_valid:
-                    n["pc"] = self.wrap_bottom if self.pc == self.wrap_top else (self.pc + 1) & 63
+                    n["pc"] = self.wrap_bottom if self.pc == self.wrap_top else (self.pc + 1) % PAGE_SIZE
                 n["exec_valid"] = exec_new is not None
                 if exec_new is not None:
                     n["exec_instr"] = exec_new & M16
@@ -483,7 +510,7 @@ class G2:
 
     def __init__(self):
         self.table = [0] * 64
-        self.enable, self.owner, self.mode, self.emit_en = False, 0, 0, False
+        self.enable, self.owner, self.mode, self.emit_en, self.emit_other = False, 0, 0, False, False
         self.in_sel = [0, 0]
         self.state, self.out = 0, 0
         self.feed_full, self.feed_bit = False, 0
@@ -523,7 +550,7 @@ class G2:
 
 class Chip:
     def __init__(self):
-        self.imem = [0] * 64
+        self.imem = [0] * MEM_SIZE
         self.engines = [Engine(0), Engine(1)]
         self.g2 = G2()
         self.enable = 0          # CTRL bits 1:0
@@ -583,9 +610,10 @@ class Chip:
         pins = self.pin_space(raw)
 
         g2_owner = self.g2.owner
+        emit_to = g2_owner ^ int(self.g2.emit_other)
         effects = []
         for i, eng in enumerate(self.engines):
-            emit = self.g2.emit_pending and g2_owner == i
+            emit = self.g2.emit_pending and emit_to == i
             effects.append(eng.evaluate(self, bool(_bit(self.enable, i)), pins, g2_owner == i, emit, self.g2.emit_bit))
         own = effects[g2_owner]
         g2n = self.g2.evaluate(pins, own["div_tick"], own["feed_wr"], own["feed_bit"])

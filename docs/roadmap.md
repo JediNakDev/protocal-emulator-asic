@@ -1,9 +1,12 @@
 # Competition roadmap
 
-Deliver a programmable, verified, routable protocol emulator in the competition's 6x4 allocation on IHP CMOS5L.
+Deliver a programmable, verified, routable protocol emulator in this project's current 6x4 allocation on IHP CMOS5L.
+The [organizer update and FAQ](competition-update.md) plans a maximum of 8x4 tiles, but says to design to 6x4 until the new template is available and treat 8x4 as an upgrade.
 Users must be able to load new programs after fabrication and implement protocols within documented timing and I/O limits.
 The [competition announcement](https://blog.janestreet.com/protocol-emulator-asic-competition/) sets the submission deadline at January 18, 2027.
 The priorities and acceptance criteria below are this project's working plan.
+Every milestone must preserve the [non-negotiable native protocol baseline](../AGENTS.md#non-negotiable-protocol-baseline) and programmability for future protocols.
+The organizers' optional stretch goals are mandatory capabilities for this project.
 
 ## Completed milestones
 
@@ -23,9 +26,17 @@ The initial single-engine UART exercise has been superseded by the implemented p
 Recorded builds meet 50 MHz at the typical corner; all-corner setup closure remains open.
 The latest measured RTL (`17995b3`) reaches +4.05 ns typical-corner setup slack and -4.14 ns slow-corner setup slack.
 
+[The issue #14 design review](design-review.md) defines the next architecture choices and their evidence gates.
+Timed waits, shift-count reads, exact receive records, all four SPI controller modes with chip select and I2C reads are implemented in the current working source.
+USB keep-alive and reset, PS/2 deadlines and on-chip CAN acknowledgement are implemented; the CAN node fills all 128 instruction words.
+CAN error signaling (B9) needs more instruction memory or denser instructions, and Ethernet receive margin (B12) needs a larger decoder or a faster clock; both wait on the decisions recorded in the design review.
+Develop these capabilities alongside physical feasibility; timing closure on the current demonstrations alone does not freeze an adequate architecture.
+
 ## 1. Confirm physical closure
 
-This is the next priority.
+Run this work alongside the protocol and storage work in milestone 2.
+Select operating clocks that support the entire mandatory protocol baseline.
+A lower clock is acceptable only if all baseline protocols remain natively achievable and are reverified at their required operating clocks.
 Use the routed results for `17995b3` as the baseline for the next timing changes.
 Publish a prerelease after each selected change to run GDS and the timing estimate as described in [the release guide](releasing.md).
 Compare the final reports with that baseline, including the area cost and remaining timing and electrical violations.
@@ -43,8 +54,9 @@ Keep the 50 MHz target separate from any operating limit justified by final repo
 
 ## 2. Resolve protocol and storage decisions
 
-Use [the verified limitations](protocols.md#limits-found-during-verification) to decide which capabilities are needed for the final submission.
-The largest candidates are a wait with timeout and access to an engine's ISR bit count.
+Use [the verified limitations](protocols.md#limits-found-during-verification) to identify and resolve gaps in the mandatory native protocol baseline.
+Timed waits and access to an engine's ISR bit count are specified and implemented in the current source.
+Use the review's B8-B13 requirements and acceptance tests to address the remaining gaps.
 Choose between flip-flop and latch storage using CMOS5L area, timing, and gate-level results.
 
 Complete this milestone when:
@@ -54,9 +66,12 @@ Complete this milestone when:
 - Both the specification and protocol guide describe the supported behavior and remaining limits.
 - A release build measures its physical cost before the architecture grows further.
 - The submitted storage variant has passed its own physical build and gate-level checks.
+- Every baseline protocol has independent top-level peer verification, with required operating clocks supported by routed timing evidence.
+- Fuller programs and simultaneous peers justify the selected instruction capacity, engine count, decoder count and Host service profiles.
 
-Prioritize reliable UART, SPI, and I2C behavior and the capture/edit/replay demonstration.
-Keep USB, Ethernet, and CAN roles scoped to what the tests and electrical interfaces support.
+Deliver reliable native support for every baseline protocol alongside the capture/edit/replay demonstration.
+Document remaining limitations accurately and track gaps that prevent meeting the baseline as unfinished work.
+Choose general programmable operations that also enable future protocols.
 
 ## 3. Make the demonstrations reproducible
 
@@ -86,6 +101,7 @@ Complete this milestone when:
 - The specification, `info.yaml`, datasheet, protocol guide, and measured operating limits agree.
 - Release notes link the GDS, reports, gate-level results, and demonstration instructions.
 - Licensing and attribution are complete for the project and incorporated components.
+- The public repository includes architecture and ISA documentation, the assembler and example programs, a verification write-up describing AI use, and passing Tiny Tapeout GDS/precheck evidence.
 - The organizers' current rules and submission form have been checked and the submission completed before the deadline.
 
 ## Working rules
