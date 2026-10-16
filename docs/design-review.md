@@ -12,13 +12,13 @@ Measurements of program size, Host throughput and protocol tolerances come from 
 
 | Topic | Decision | Status |
 | --- | --- | --- |
-| Wait with a deadline | Timed `wait` with X as the count of checks; X is 0 afterwards only on timeout | Implemented ([spec](spec.md#timed-wait)) |
+| Timed wait | Timed `wait` with X as the count of checks; X is 0 afterwards only on timeout | Implemented ([spec](spec.md#timed-wait)) |
 | Record lengths and boundaries | `mov x, isrcnt` reads the ISR count; receivers close messages with count-terminated records | Implemented ([framing](protocols.md#record-framing)) |
-| Protocol gaps closed with them | CAN receive resynchronization, USB reply deadline, Ethernet frame boundaries and link pulses, SWD WAIT/FAULT, SPI modes 1-3, I2C reads at 100 and 400 kHz | Implemented with pin-level regressions |
+| Protocol gaps closed with them | CAN receive resynchronization, USB reply deadline, Ethernet frame boundaries and link pulses, SWD WAIT/FAULT, SPI modes 1-3 and chip select, I2C reads at 100 and 400 kHz | Implemented with pin-level regressions |
 | Engines | Keep two for now; evaluate a third with the 8x4 allocation | Provisional |
 | Bit state machine (G2) | Keep one shared instance; it limits concurrency, not individual protocols | Provisional |
 | Clock | Keep 50 MHz as the physical target and 40/48/50 MHz program profiles; 60 MHz is the lowest common clock with exact integer bit intervals | Provisional, evaluation recorded |
-| Instruction memory | 128 flip-flop words in two pages of 64; EXECCFG bit 7 selects each engine's starting page and `set page` lets a program cross pages | Implemented ([spec](spec.md#instruction-memory)); the CAN node fills all 128 words, so CAN error signaling (B9) needs more (section 5) |
+| Instruction memory | 128 flip-flop words in two pages of 64; EXECCFG bit 7 selects each engine's starting page and `set page` lets a program cross pages | Implemented ([spec](spec.md#instruction-memory)) on an unrouted area estimate, so provisional until a routed build confirms it (section 5); the CAN node fills all 128 words, so CAN error signaling (B9) and a transmit underrun guard (B14) need more |
 | G2 emission target | G2_CTRL bit 5 emits into the engine that does not own G2, so one engine can decode the line while the other runs the protocol | Implemented ([spec](spec.md#bit-state-machine-g2)) |
 | Storage | Flip-flops for now; latch or SRAM only after a physical build shows a gain | Open |
 | Allocation | Stay at 6x4 until the 8x4 template is available | Provisional |
@@ -31,12 +31,12 @@ Each row lists what is implemented and verified at the top-level pins today, and
 | Protocol | Roles implemented | Rates verified | Evidence | Still missing |
 | --- | --- | --- | --- | --- |
 | UART | 8N1 transmitter and receiver | 16 cycles per bit (3.125 Mbaud at 50 MHz); any rate `f / (8 (CLKDIV + 1))` | `test_uart_tx`, `test_uart_rx` | Standard baud rates checked in absolute time, receiver tolerance to baud offset, other frame formats, break and flow control |
-| SPI | Controller, modes 0-3 | SCK 6.25 MHz, and 12.5 MHz in modes 0 and 2 with MISO bypass | `test_spi_controller_mode0`-`mode3`, `test_spi_controller_12mhz_bypass` | Peripheral role; chip select by the program |
+| SPI | Controller, modes 0-3, with chip select | SCK 6.25 MHz, and 12.5 MHz in modes 0 and 2 with MISO bypass | `test_spi_controller_mode0`-`mode3`, `test_spi_controller_12mhz_bypass`, `test_spi_host_pause` | Peripheral role; more than one chip select |
 | I2C | Controller: write, read, repeated START, stretching | 100 kHz and 400 kHz, UM10204 minimums checked in ns | `test_i2c_controller_100khz`, `_400khz`, `_400khz_no_stretch` | Target role; multi-controller arbitration; bus recovery; SMBus clock-low timeout |
 | JTAG | Controller | TCK 6.25 MHz | `test_jtag_idcode_ir_dr_bypass` | Other TCK rates in absolute time; TRST and system reset pins |
-| SWD | Host: transactions with on-chip ACK check, line reset, sequences | SWCLK 6.25 MHz | `test_swd_read_write`, `test_swd_bad_request_and_recovery`, `test_swd_wait_and_fault` | ORUNDETECT = 1; dormant-state selection sequences tested; target role |
+| SWD | Host: transactions with on-chip ACK check, line reset, sequences | SWCLK 6.25 MHz | `test_swd_read_write`, `test_swd_bad_request_and_recovery`, `test_swd_wait`, `test_swd_fault_and_abort` | ORUNDETECT = 1; dormant-state selection sequences tested; target role |
 | PS/2 | Device and host, with bounded waits | 10-16.7 kHz clock | `test_ps2_*` | Real-device evidence |
-| CAN 2.0A and 2.0B | Node: transmitter with arbitration and receiver that checks the CRC and acknowledges; listen-only 2.0A receiver | 1 Mbit/s; the node acknowledges transmitters 1.5% fast and slow; listen-only receive tolerance 2.2% fast to 3.5% slow measured | `test_can_*` | Error frames, counters and bus-off (B9); overload frames |
+| CAN 2.0A and 2.0B | Node: transmitter with arbitration and receiver that checks the CRC and acknowledges; listen-only 2.0A receiver | 1 Mbit/s; the node acknowledges transmitters 1.5% fast and slow, also after ten bits without an edge; listen-only receive tolerance 2.2% fast to 3.5% slow measured | `test_can_*` | Error frames, counters and bus-off (B9); a transmit queue that runs dry mid-frame (B14); overload frames |
 | Low-speed USB | Host, bit level, with a 17-bit-time reply deadline, keep-alive and bus reset | 1.5 Mbit/s at 48 MHz; device clock +/- 1.5% | `test_usb_*` | Device role; operation at 50 MHz |
 | 10BASE-T | Transmitter with link pulses; receiver with exact framing | 10 Mbit/s at 40 MHz; receive jitter +/- 9 ns | `test_eth_*` | Receive jitter margin per 802.3; link integrity state; collision handling; full duplex at line rate |
 
@@ -53,15 +53,16 @@ Each limitation that blocks reliable native support becomes a required behavior 
 | B2 | A missing USB reply stalled the program | Give up 16-18 bit times after the end of SE0, report it, run the next command | No reply; a reply at 16.75 bit times received, at 17.25 reported missing; the next transaction succeeds | Done: `test_usb_missing_reply_is_bounded`, `test_usb_reply_inside_deadline`, `_after_deadline` |
 | B3 | Ethernet frame boundaries depended on Host timing | Records keep exact lengths and boundaries whenever the Host reads them | Back-to-back frames at the 9.6 µs minimum gap, with link pulses and a Host pausing between reads | Done: `test_eth_receive_back_to_back` |
 | B4 | No Ethernet link pulses | Normal link pulses every 16 +/- 8 ms while idle, 100 ns wide; frames start promptly | Pulse width, interval from idle and after a frame | Done: `test_eth_link_pulses` |
-| B5 | SWD sent the data phase after WAIT or FAULT, so a write's data could read as a request and the target could drive SWDIO against the host | Skip the data phase after any ACK other than OK and keep the command stream aligned | WAIT on a write whose data is a valid request byte, FAULT on a read, then successful retries; no contention | Done: `test_swd_wait_and_fault` |
-| B6 | SPI had mode 0 only | Modes 0-3 with SCK idling at CPOL | Each mode against a mode-parametric peripheral | Done: `test_spi_controller_mode0`-`mode3` |
+| B5 | SWD sent the data phase after WAIT or FAULT, so a write's data could read as a request and the target could drive SWDIO against the host | Skip the data phase after any ACK other than OK and keep the command stream aligned | A busy AP answers WAIT to a write whose data is a valid request byte, but not to a CTRL/STAT read; an AP error sets STICKYERR, so AP and DP accesses get FAULT until ABORT clears it; then successful retries; no contention | Done: `test_swd_wait`, `test_swd_fault_and_abort` |
+| B6 | SPI had mode 0 only, and the Host drove chip select | Modes 0-3 with SCK idling at CPOL; the program drives chip select and holds it across a late Host | Multi-byte transactions, back to back and with a Host pause inside one, against a mode-parametric peripheral that answers only while selected; CS_N setup, hold and high times checked in ns | Done: `test_spi_controller_mode0`-`mode3`, `test_spi_host_pause` |
 | B7 | I2C had writes only and no speed evidence | Reads with ACK/NACK, repeated START, stretching, at 100 and 400 kHz within UM10204 timing | Write, pointer write plus repeated-START read, NACK; timing checked in ns | Done: `test_i2c_controller_*` |
-| B8 | The chip does not acknowledge received CAN frames | A correctly received frame gets a dominant ACK slot from the chip, with no external protocol controller | A node transmitting alone on the bus sees its frame acknowledged by the chip; a frame with a bad CRC is not acknowledged | Done: `test_can_node_acks` (also 1.5% fast and slow), `test_can_node_bad_crc_not_acked` |
+| B8 | The chip does not acknowledge received CAN frames | A correctly received frame gets a dominant ACK slot from the chip, with no external protocol controller | A node transmitting alone on the bus sees its frame acknowledged by the chip, with the CRC delimiter, ACK delimiter and end of frame recessive; a frame with a bad CRC is not acknowledged | Done: `test_can_node_acks` (also 1.5% fast and slow), `test_can_node_bad_crc_not_acked` |
 | B9 | No CAN error signaling | Error frames on stuff, form, CRC and bit errors; error counters, error-passive and bus-off | A node injecting each error type; recovery after bus-off | Open; the node fills the instruction memory, so this needs more words or denser instructions ([section 5](#can-node-capacity-and-error-signaling-b9)) |
-| B10 | No USB keep-alive or bus reset | Keep-alive within each 1 ms while idle; a reset SE0 of at least 10 ms on request | Device model that suspends after 3 ms idle; reset length checked in absolute time | Done: `test_usb_keep_alive`, `test_usb_bus_reset` |
+| B10 | No USB keep-alive or bus reset | Keep-alive within each 1 ms while idle; a reset SE0 of at least 50 ms (a root port, USB 2.0 TDRSTR) on request | Device model that suspends after 3 ms idle; reset length checked in absolute time | Done: `test_usb_keep_alive`, `test_usb_bus_reset` |
 | B11 | PS/2 waits forever for a silent peer | Bounded waits with a reported failure | Host program against an absent device; device program against an inhibiting host | Done: `test_ps2_host_absent_device`, `test_ps2_host_device_stops`, `test_ps2_device_inhibited` |
 | B12 | Ethernet receive jitter margin below 802.3 | Decode with the jitter 802.3 allows at the receiver | Jitter sweep to the standard's limit, at all input phases | Deferred; the decoder's limit is about +/- 9.4 ns against +/- 13.5 ns required ([section 5](#ethernet-receive-jitter-b12)) |
-| B13 | Peers run in cycles, so a chip clock change scales both sides | Peers keep their wire rates in absolute time | Each program at its clock profile, checked in ns, and failing when the chip clock is wrong | Done: every protocol test module has a `*_wrong_clock` control |
+| B13 | Peers run in cycles, so a chip clock change scales both sides | Peers keep their wire rates in absolute time | Each program at its clock profile, checked in ns, and failing when the chip clock is wrong | Done: every protocol test module has a `*_wrong_clock` control, and the listen-only CAN and Ethernet receivers have their own (`test_can_receive_wrong_clock`, `test_eth_receive_wrong_clock`) |
+| B14 | A CAN transmit queue that runs dry inside a frame stalls `can_node` with TXD at the last bit's level, which can hold the bus dominant | A transmitter that runs out of queued bits releases TXD and ends the frame, never holding the bus dominant | The Host stops feeding a frame part way; the bus returns to recessive within a bit | Open; the guard needs about 4 words in the node's bit loop, and the node fills the instruction memory ([section 5](#can-node-capacity-and-error-signaling-b9)). Until then the Host must keep the 8-word queue (32 bits, 32 µs at 1 Mbit/s) from running dry, as for Ethernet transmit; `test_can_node_transmit_host_pause` shows a 24 µs pause is absorbed |
 
 ## 3. Timeout and record-boundary interfaces
 
@@ -115,7 +116,7 @@ Interactions: the count is read at the start of the cycle, before any G2 emissio
 | `usb_ls_host` + `usb_ls_rx` | 37 + 5 | 2 | G2, output pin 12 |
 | `uart_tx` + `uart_rx` | 4 + 9 | 2 | |
 | `capture` + `replay` | 7 + 3 | 1 each | Edge capture, one flag |
-| `spi_cpha0` / `spi_cpha1` | 2 / 3 | 1 | |
+| `spi_cpha0` / `spi_cpha0_fast` / `spi_cpha1` | 11 each | 1 | |
 | `jtag` | 2 | 1 | |
 
 Every program except the CAN node fits one 64-word page alone, and SWD with a UART receiver fits one page together (57).
@@ -163,20 +164,21 @@ The USB receive enable wastes output pin 12 because G2 reads only the pin space;
 | --- | --- | --- | --- |
 | Engines | 2 | USB, CAN node, Ethernet, UART full duplex use both | Any of those excludes every other protocol |
 | G2 | 1 | CAN receive, USB receive, Ethernet receive | Only one of these at a time |
-| Instruction memory | 128 words, two pages of 64 | All | A program is limited to one page; concurrent programs need a size check per page |
+| Instruction memory | 128 words, two pages of 64 | All | A program over 64 words crosses pages with `set page`; programs sharing a page need a size check per page |
 | Clock profile | 1 board clock | Ethernet 40 MHz, USB 48 MHz, CAN 50 MHz | The current Ethernet and USB programs require different clocks |
 
 Concurrent operation of all nine protocols is not a requirement.
 Useful targets, to be measured before deciding on engines: a debug probe with a console (SWD or JTAG with UART receive), a sensor bridge (I2C with SPI), a CAN node with a sniffer (CAN with capture), and any single-engine protocol with capture of its own lines.
 Only the first two fit two engines today.
-The debug probe with UART receive uses 57 words for SWD or 11 for JTAG; I2C with SPI uses 26 or 27 words.
-CAN transmit/receive with capture uses 47 words but needs three engines; UART full duplex with capture uses 20 words and also needs three.
+The debug probe with UART receive uses 57 words for SWD or 11 for JTAG; I2C with SPI uses 35 words.
+A CAN node with capture needs three engines and 135 words, more than either resource; UART full duplex with capture uses 20 words but also needs three engines.
 These capacity checks do not establish concurrency: pin remapping, combined Host service and independent simultaneous peers must be tested for each target.
 
-### Area and timing cost of this change
+### Area and timing cost of the timed wait and count reads
 
-Local synthesis with yosys and ABC to the IHP SG13G2 typical liberty (an estimate of the CMOS5L flow, as in [the area log](area-log.md)): 332,357 µm² before and 332,568 µm² after (+211 µm², +0.06%); ABC's unrouted logic delay estimate is 5.84 ns before and 5.81 ns after.
-The routed cost must still be measured with a prerelease build (section 6, step 2).
+Local synthesis of the timed wait and count reads, before the instruction memory grew, with yosys and ABC to the IHP SG13G2 typical liberty (an estimate of the CMOS5L flow, as in [the area log](area-log.md)): 332,357 µm² before and 332,568 µm² after (+211 µm², +0.06%); ABC's unrouted logic delay estimate is 5.84 ns before and 5.81 ns after.
+The 128-word instruction memory adds about 97,000 µm² (+29%) on top of that ([below](#instruction-memory-and-storage)).
+The routed cost of both must still be measured with a prerelease build (section 6, step 2).
 
 The October 14 rerun reproduces 332,568.5958 µm² for flip-flop storage and measures 280,354.2840 µm² for latch storage with Yosys 0.69+post (`143eb14f`).
 The latch variant saves 15.7% of total mapped cell area; this does not measure routing, clock trees, setup or hold.
@@ -248,6 +250,7 @@ Wiring two open-drain pins together and an on-chip wired-AND pin mode were consi
 B9 adds, beyond the node: error flags (6 dominant bits, or 6 recessive bits when error-passive) and the 8-bit error delimiter after any detected error; form checks of the CRC delimiter, the acknowledgement delimiter and the end of frame; the transmitter's acknowledgement error; transmit and receive error counters with their +1, +8 and -1 rules; error-passive at 128; bus-off above 255, and recovery after 128 occurrences of 11 recessive bits.
 A sketch of this on the current instruction set needs roughly 50 to 70 more words, mostly for the counters, whose only arithmetic is a decrement.
 No word is free: the node uses all 128.
+The transmit underrun guard (B14) needs about 4 more words in the node's bit loop: before the `out pc` that would stall, test the OSR count (`jmp !osre`) and the queue level (`mov x, status`), and end the frame with TXD recessive instead.
 
 | ID | Change | Current | Proposed |
 | --- | --- | --- | --- |
@@ -340,7 +343,9 @@ Cons:
 
 Rejected alternatives: a wider PC and jump encoding changes every instruction format and the assembler for a gain that only a single program over 64 words would need; SRAM macros need a second read port or arbitration that changes fetch timing (below).
 
-Decision: 128 flip-flop words in two pages, implemented in this change; revisit latch storage only with a physical build and gate-level tests.
+Decision: 128 flip-flop words in two pages, implemented in this change because the acknowledging CAN node (B8) cannot fit 64 words.
+It rests on the unrouted estimate above, so it stays provisional: the routed prerelease (section 6, step 2) must confirm utilization and timing before the size is frozen, and the capacity question is reopened together with C3 if it does not fit.
+Revisit latch storage only with a physical build and gate-level tests.
 
 The current store supports one Host write and two independent engine fetches, with same-cycle write forwarding.
 A synchronous SRAM candidate must preserve one issued instruction per enabled tick, stalled and branch fetch behavior, and live-write visibility; otherwise every protocol's timing changes.
@@ -360,7 +365,7 @@ Keep 6x4 until the 8x4 template is confirmed; use 8x4 for measured gains (engine
 4. Done: CAN acknowledgement (B8) by a node program pair across both pages, with no pin sharing; measured at 128 words.
 5. Done in this change: 128 instruction words in two pages, and G2 emission into either engine; storage stays flip-flops until a latch or SRAM build shows a verified gain.
 6. Done: USB keep-alive and reset (B10), PS/2 timeouts (B11).
-   CAN error signaling (B9) waits for the memory decision of section 5.
+   CAN error signaling (B9) and the transmit underrun guard (B14) wait for the memory decision of section 5.
 7. Ethernet receive margin (B12): deferred with the options of section 5, measured with a jitter sweep when one is built.
 8. With the 8x4 template: a three-engine and two-G2 experiment against the concurrency targets.
 9. Board workflow and demonstrations (roadmap milestone 3), then freeze (milestone 4).
@@ -372,7 +377,7 @@ Run synthesis after each RTL step and a routed prerelease after each step that c
 The baseline is complete only when all of these pass:
 
 - Every mandatory protocol has reliable native signaling for its declared roles and rates, with independent top-level peer tests; unfinished behavior remains tracked and cannot remove a mandatory protocol.
-- Open rows B8-B13 of section 2 pass their acceptance tests.
+- Open rows B9, B12 and B14 of section 2 pass their acceptance tests, and every done row keeps passing.
 - Each program's wire timing is checked in absolute time at its clock profile.
 - A routed build of the final source meets setup and hold at every intended corner for every clock profile the programs need (40, 48 and 50 MHz today), with fanout, slew and capacitance violations resolved or explained.
 - The submitted storage variant passes its own physical build and gate-level tests.
@@ -381,7 +386,7 @@ The baseline is complete only when all of these pass:
 ## Verification notes
 
 The new instructions are checked three ways: directed tests at the pins (`test_engine.test_timed_wait`, `test_timed_wait_flag_and_reserved`, `test_count_sources`), random programs compared every cycle with the reference model, whose generator now places short counts before timed waits so that they also time out, and every protocol regression above.
-Negative controls confirmed that the checks can fail: the SPI peripheral rejects a CPHA 0 program in mode 1, and the I2C target reports Standard-mode violations for the Fast-mode timing.
+Negative controls confirmed that the checks can fail: the SPI peripheral rejects a CPHA 0 program in mode 1, a chip select released while the Host is late and a CS_N high time of one cycle; the CAN peer reports an acknowledgement held into the ACK delimiter; and the I2C target reports Standard-mode violations for the Fast-mode timing.
 Two test bugs surfaced and were fixed along the way: the Ethernet driver started TP_IDL 250 ns late, which the old framing hid, and `Chip.start` started a second clock driver whenever a test reset the chip.
 
 ## Review completion and follow-up gates
@@ -390,4 +395,4 @@ The issue distinguishes completion of this review from completion of the native 
 The review records protocol coverage (section 1), blocking requirements and pin tests (section 2), timeout and record interfaces (section 3), resource and Host measurements (section 4), provisional design choices and experiments (section 5), implementation order (section 6), and outstanding acceptance evidence (section 7).
 The selected implementation remains two engines, one G2, 128 flip-flop instruction words in two pages, 6x4 allocation and separate clock profiles; none is a final capacity or operating guarantee.
 Final engine count, common-clock support and storage technology remain gated by fuller CAN programs, simultaneous peer tests and source-linked physical builds.
-Do not freeze the architecture or mark the baseline complete while those gates or B8-B13 remain open.
+Do not freeze the architecture or mark the baseline complete while those gates or B9, B12 and B14 remain open.

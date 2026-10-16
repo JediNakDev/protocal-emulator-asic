@@ -6,8 +6,8 @@ wrong clock as a negative control, which the peers must reject."""
 import cocotb
 
 from chip import MHZ_50, Chip, fails_at_wrong_clock, regs
-from pe.proto import i2c
-from peers import I2CTarget, SpiPeripheral, Wave, uart_receive, uart_transmit
+from pe.proto import i2c, spi
+from peers import I2CTarget, SpiPeripheral, Wave, sleep_ns, uart_receive, uart_transmit
 
 PROFILE = MHZ_50
 
@@ -63,8 +63,8 @@ async def uart_rx_session(dut, baud, hz=PROFILE):
     data = [0x00, 0xFF, 0x55, 0xA3, 0x7E]
     await uart_transmit(chip.set_pin8, baud, data)
     words = await chip.pop_wait(0, len(data), timeout=20 * 10 * PROFILE // baud)
-    assert [w >> 8 for w in words] == data, [hex(w) for w in words]
-    assert (await chip.read8(regs.FLAGS)) & 0x10 == 0, "framing error"
+    assert [w >> 8 for w in words] == data, f"UART bytes {[hex(w >> 8) for w in words]}"
+    assert (await chip.read8(regs.FLAGS)) & 0x10 == 0, "UART framing error"
     return chip
 
 
@@ -84,39 +84,55 @@ async def test_uart_wrong_clock(dut):
     rejects, and receive garbage from a 115200 baud sender."""
     msg = await fails_at_wrong_clock(lambda hz: uart_tx_session(dut, 115_200, hz), PROFILE)
     assert "timing:" in msg, msg
-    await fails_at_wrong_clock(lambda hz: uart_rx_session(dut, 115_200, hz), PROFILE)
+    msg = await fails_at_wrong_clock(lambda hz: uart_rx_session(dut, 115_200, hz), PROFILE)
+    assert msg.startswith("UART") or "words" in msg, msg  # wrong bytes, framing or lost bytes
 
 
-async def spi_run(dut, program_name, bypass, data_out, data_in, mode=0, rate=6_250_000, hz=PROFILE):
+SPI_MOSI, SPI_SCK, SPI_CS_N, SPI_MISO = 0, 1, 2, 9
+
+
+async def spi_run(dut, program_name, bypass, transactions, data_in, mode=0, rate=6_250_000,
+                  hz=PROFILE, pause_ns=0):
+    """Runs each transaction (a list of bytes) under its own chip select,
+    queued back to back. With pause_ns, the Host instead holds back the
+    last byte of each transaction that long, so SCK idles with CS_N held
+    low."""
     chip = await new_chip(dut, hz)
+    chip.pull_up(1 << SPI_CS_N)
     prog = await chip.load_program(program_name)
-    autopull = 0 if mode & 1 else regs.AUTOPULL  # the CPHA 1 program pulls itself
-    await chip.setup_engine(0, prog, shiftctrl=autopull | regs.AUTOPUSH,
-                            thresh=8 | (8 << 4), out_base=0, in_base=9, side_base=1)
-    await chip.ereg(0, regs.SETPIN, 0 | (2 << 4))
-    await chip.force_asm(0, "set pindirs, 3 side 0", side_count=1)
-    await chip.pincfg(0, regs.DRIVE_PUSH_PULL)
-    await chip.pincfg(1, regs.DRIVE_PUSH_PULL | (regs.PIN_INVERT if mode & 2 else 0))
-    await chip.pincfg(9, regs.PIN_BYPASS if bypass else 0)
+    await chip.setup_engine(0, prog, shiftctrl=regs.AUTOPUSH, thresh=8, out_base=SPI_MOSI,
+                            set_base=SPI_MOSI, set_count=3, in_base=SPI_MISO, side_base=SPI_SCK)
+    await chip.force_asm(0, "set pindirs, 7 side 2", side_count=2)  # SCK idle, CS_N high
+    await chip.pincfg(SPI_MOSI, regs.DRIVE_PUSH_PULL)
+    await chip.pincfg(SPI_SCK, regs.DRIVE_PUSH_PULL | (regs.PIN_INVERT if mode & 2 else 0))
+    await chip.pincfg(SPI_CS_N, regs.DRIVE_PUSH_PULL)
+    await chip.pincfg(SPI_MISO, regs.PIN_BYPASS if bypass else 0)
     await chip.cycles(2)
-    periph = SpiPeripheral(Wave(dut.uio_in, 1), Wave(dut.uio_in, 0), chip.set_pin9, mode, data_in, rate)
-    task = cocotb.start_soon(periph.run(8 * len(data_out)))
-    await chip.push(0, [b << 8 for b in data_out[:4]])
+    periph = SpiPeripheral(Wave(dut.uio_in, SPI_SCK), Wave(dut.uio_in, SPI_MOSI),
+                           Wave(dut.uio_in, SPI_CS_N), chip.set_pin9, mode, data_in, rate)
+    task = cocotb.start_soon(periph.run(len(transactions)))
     await chip.enable(1)
     rx = []
-    for b in data_out[4:]:
-        rx += await chip.pop_wait(0, 1)
-        await chip.push(0, [b << 8])
-    rx += await chip.pop_wait(0, len(data_out) - len(rx))
-    assert await task == data_out
+    if pause_ns:
+        for t in transactions:
+            words = spi.transaction(t)
+            rx += await chip.stream(0, words[:-1], len(words) - 1)
+            await sleep_ns(pause_ns)
+            rx += await chip.stream(0, words[-1:], 1)
+    else:  # back to back: each transaction is queued before the last ends
+        words = [w for t in transactions for w in spi.transaction(t)]
+        rx = await chip.stream(0, words, len(words))
+    assert await task == transactions
     violations = periph.check()
     assert not violations, violations[:5]
-    assert [w & 0xFF for w in rx] == data_in, [hex(w) for w in rx]
+    expected = [b for t in transactions for b in data_in[:len(t)]]
+    assert [spi.decode(w) for w in rx] == expected, [hex(w) for w in rx]
     await chip.cycles(20)
     assert periph.sck.read() == mode >> 1, "SCK idles at CPOL after the transfer"
+    assert periph.cs_n.read() == 1, "CS_N high after the transfer"
 
 
-SPI_OUT = [0x9F, 0x00, 0xA5, 0x3C, 0xFF, 0x81]
+SPI_OUT = [[0x9F, 0x00, 0xA5, 0x3C, 0xFF, 0x81], [0x05], [0x03, 0x12]]
 SPI_IN = [0x5A, 0xC3, 0x01, 0x80, 0x7E, 0x00]
 
 
@@ -143,8 +159,16 @@ async def test_spi_controller_mode3(dut):
 @cocotb.test()
 async def test_spi_controller_12mhz_bypass(dut):
     """4 cycles per bit (12.5 MHz) needs the MISO synchronizer bypassed."""
-    await spi_run(dut, "spi_cpha0_fast", True, [0x9F, 0x00, 0xA5, 0x3C],
-                  [0x5A, 0xC3, 0x01, 0x80], rate=12_500_000)
+    await spi_run(dut, "spi_cpha0_fast", True, SPI_OUT, SPI_IN, rate=12_500_000)
+
+
+@cocotb.test()
+async def test_spi_host_pause(dut):
+    """A Host 20 us late with the last byte of a transaction only stretches
+    the idle SCK: CS_N stays low, so the peripheral sees one transaction."""
+    for name, mode in (("spi_cpha0", 0), ("spi_cpha1", 3)):
+        await spi_run(dut, name, False, [[0x9F, 0x00, 0xA5], [0x3C, 0x81]], SPI_IN, mode,
+                      pause_ns=20_000)
 
 
 @cocotb.test()
@@ -153,7 +177,7 @@ async def test_spi_wrong_clock(dut):
     for name, mode, rate in (("spi_cpha0", 0, 6_250_000), ("spi_cpha1", 1, 6_250_000),
                              ("spi_cpha0_fast", 0, 12_500_000)):
         msg = await fails_at_wrong_clock(
-            lambda hz: spi_run(dut, name, name.endswith("fast"), SPI_OUT[:4], SPI_IN[:4], mode, rate, hz),
+            lambda hz: spi_run(dut, name, name.endswith("fast"), SPI_OUT[:1], SPI_IN, mode, rate, hz),
             PROFILE)
         assert "timing: clock period" in msg, (name, msg)
 

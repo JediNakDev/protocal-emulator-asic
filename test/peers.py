@@ -190,47 +190,98 @@ async def uart_transmit(set_line, baud, data, stop=1, idle_bits=2):
 
 # -------------------------------------------------------------------- SPI
 class SpiPeripheral:
-    """SPI peripheral in mode 0-3, most significant bit first. CPOL is the
-    SCK idle level; with CPHA 0 it samples MOSI on the leading edge and
-    changes MISO on the trailing one, with CPHA 1 the other way round.
-    MISO changes `tco_ns` after its edge, like a real device's
+    """SPI peripheral in mode 0-3, most significant bit first, selected by
+    an active-low CS_N. CPOL is the SCK idle level; with CPHA 0 it samples
+    MOSI on the leading edge and changes MISO on the trailing one, with
+    CPHA 1 the other way round. Each selection is one transaction: the
+    peripheral answers `miso_bytes` from its first bit again, and with CPHA
+    0 presents the first bit when CS_N falls. While deselected MISO holds
+    the complement of that bit, so a controller sampling it early reads
+    garbage. MISO changes `tco_ns` after its edge, like a real device's
     clock-to-output time. `check()` reports SCK periods off the nominal
-    rate and MOSI setup or hold below the minimums."""
+    rate, MOSI setup or hold below the minimums, SCK edges while
+    deselected, SCK away from CPOL when CS_N changes, and CS_N setup, hold
+    and high times below the minimums."""
 
-    def __init__(self, sck, mosi, set_miso, mode, miso_bytes, rate_hz,
-                 tco_ns=8.0, t_su=10.0, t_h=10.0):
-        self.sck, self.mosi, self.set_miso = sck, mosi, set_miso
+    def __init__(self, sck, mosi, cs_n, set_miso, mode, miso_bytes, rate_hz,
+                 tco_ns=8.0, t_su=10.0, t_h=10.0, t_css=50.0, t_csh=50.0, t_csd=100.0):
+        self.sck, self.mosi, self.cs_n, self.set_miso = sck, mosi, cs_n, set_miso
         self.cpol, self.cpha = mode >> 1, mode & 1
         self.miso_bits = [(b >> (7 - i)) & 1 for b in miso_bytes for i in range(8)]
         self.rate_hz, self.tco_ns, self.t_su, self.t_h = rate_hz, tco_ns, t_su, t_h
+        self.t_css, self.t_csh, self.t_csd = t_css, t_csh, t_csd
         self.samples = []
+        self.violations = []
+        self.set_miso(1 - self.miso_bits[0])
 
     async def _miso_later(self, bit):
         await sleep_ns(self.tco_ns)
         self.set_miso(bit)
 
-    async def run(self, nbits):
-        """Returns the MOSI bytes of nbits clocks."""
-        out = iter(self.miso_bits + [0] * nbits)
+    async def _transaction(self):
+        """One selection, from CS_N low until it rises: the MOSI bits."""
+        out = iter(self.miso_bits + [0] * 1024)
         if not self.cpha:
-            self.set_miso(next(out))  # the first bit is out before the first edge
-        got = []
-        assert self.sck.read() == self.cpol, f"SCK must idle at CPOL = {self.cpol}"
-        while len(got) < nbits:
-            level = await self.sck.change()
+            cocotb.start_soon(self._miso_later(next(out)))  # first bit on CS_N falling
+        got, prev = [], self.sck.read()
+        while True:
+            await First(self.sck.signal.value_change, self.cs_n.signal.value_change)
+            if self.cs_n.read():
+                if self.sck.read() != self.cpol:
+                    self.violations.append(f"SCK not at CPOL = {self.cpol} when CS_N rises")
+                return got
+            level = self.sck.read()
+            if level == prev:
+                continue
+            prev = level
             leading = level != self.cpol
             if leading != bool(self.cpha):
                 self.samples.append(now_ns())
                 got.append(self.mosi.read())
             elif self.cpha or got:
                 cocotb.start_soon(self._miso_later(next(out)))
-        return [sum(got[8 * i + j] << (7 - j) for j in range(8)) for i in range(nbits // 8)]
+
+    async def run(self, ntransactions):
+        """Returns the MOSI bytes of each of ntransactions selections."""
+        assert self.cs_n.read() == 1, "CS_N must start high"
+        assert self.sck.read() == self.cpol, f"SCK must idle at CPOL = {self.cpol}"
+        transactions = []
+        while len(transactions) < ntransactions:
+            if self.cs_n.read():
+                await self.cs_n.change()
+                if self.sck.read() != self.cpol:
+                    self.violations.append(f"SCK not at CPOL = {self.cpol} when CS_N falls")
+                continue
+            bits = await self._transaction()
+            if len(bits) % 8:
+                self.violations.append(f"transaction of {len(bits)} bits")
+            transactions.append([sum(bits[8 * i + j] << (7 - j) for j in range(8))
+                                 for i in range(len(bits) // 8)])
+            self.set_miso(1 - self.miso_bits[0])
+        return transactions
 
     def check(self):
+        """Violations of the clock rate and of data and select timing."""
         sample_rising = (self.cpol == 0) != bool(self.cpha)
         out, checked = clock_violations(self.sck, sample_rising, self.rate_hz)
         assert checked, "no SCK period to check"
-        return out + setup_hold_violations(self.mosi, self.samples, self.t_su, self.t_h, "MOSI")
+        out += setup_hold_violations(self.mosi, self.samples, self.t_su, self.t_h, "MOSI")
+        sck = self.sck.edges()
+        falls, rises = self.cs_n.edges(level=0), self.cs_n.edges(level=1)
+        for f in falls:
+            selected_until = next((r for r in rises if r > f), float("inf"))
+            inside = [t for t in sck if f < t < selected_until]
+            if inside and inside[0] - f < self.t_css:
+                out.append(f"timing: CS_N setup {inside[0] - f:.1f} ns before the first SCK edge")
+            if inside and selected_until - inside[-1] < self.t_csh:
+                out.append(f"timing: CS_N hold {selected_until - inside[-1]:.1f} ns after the last SCK edge")
+            before = [r for r in rises if r < f]
+            if before and f - before[-1] < self.t_csd:
+                out.append(f"timing: CS_N high {f - before[-1]:.1f} ns between transactions")
+        for t in sck:
+            if self.cs_n.at(t):
+                out.append(f"SCK edge at {t:.0f} ns while CS_N is high")
+        return self.violations + out
 
 
 # UM10204 Table 10 minimums in ns, and the maximum SCL frequency.

@@ -134,8 +134,7 @@ async def test_eth_transmit(dut):
 @cocotb.test()
 async def test_eth_wrong_clock(dut):
     """At 50 MHz the 40 MHz transmit program sends 12.5 Mbit/s, which the
-    monitor rejects. (The receive table's windows also span a jitter-free
-    10 Mbit/s frame at 50 MHz; its driver runs on timers in ns either way.)"""
+    monitor rejects."""
     msg = await fails_at_wrong_clock(lambda hz: transmit_session(dut, hz), PROFILE)
     assert "timing: Manchester" in msg, msg
 
@@ -228,8 +227,9 @@ async def receive(dut, payload, jitter_ns, start_ns, seed=1, hz=PROFILE):
     await rx_setup(chip)
     wire = wire_frame(payload)
     cocotb.start_soon(drive_rx(chip, wire, jitter_ns, start_ns, seed))
-    (record,), words = await collect_records(chip, 1, timeout=20_000)
-    check_frame(record, wire)
+    records, words = await collect_records(chip, 1, timeout=20_000)
+    assert len(records) == 1, f"frame split into {len(records)} records"
+    check_frame(records[0], wire)
     await no_overflow(chip)
 
 
@@ -244,6 +244,16 @@ async def test_eth_receive_jitter(dut):
     12.5 ns between two consecutive transitions; in simulation it passes at
     +/- 9 ns per transition and fails at +/- 10 ns."""
     await receive(dut, bytes(reversed(range(60))), jitter_ns=8, start_ns=1003, seed=7)
+
+
+@cocotb.test()
+async def test_eth_receive_wrong_clock(dut):
+    """At 50 MHz the 40 MHz receive table's windows are 20% short: a frame
+    with the +/- 8 ns jitter it tolerates at 40 MHz breaks up."""
+    msg = await fails_at_wrong_clock(
+        lambda hz: receive(dut, bytes(reversed(range(60))), jitter_ns=8, start_ns=1003, seed=7, hz=hz),
+        PROFILE)
+    assert "records" in msg, msg
 
 
 @cocotb.test()

@@ -401,12 +401,13 @@ async def test_usb_keep_alive(dut):
 
 @cocotb.test()
 async def test_usb_bus_reset(dut):
-    """A reset command holds SE0 for at least 10 ms (USB 2.0 7.1.7.5), then
-    the device answers as usual."""
+    """A reset command holds SE0 for at least 50 ms, the minimum for a root
+    port (USB 2.0 7.1.7.5, TDRSTR), and less than one more 1.025 ms unit,
+    then the device answers as usual."""
     chip, dev, contention = await setup(dut)
     await chip.push(0, usb.reset())
-    await sleep_ns(12_000_000)
-    assert len(dev.resets) == 1 and 10_000_000 <= dev.resets[0] <= 10_600_000, dev.resets
+    await sleep_ns(52_000_000)
+    assert len(dev.resets) == 1 and 50_000_000 <= dev.resets[0] <= 51_025_000, dev.resets
     assert not dev.suspends, dev.suspends
     assert await in_transaction(chip) == (usb.PID_DATA1, DESCRIPTOR, True)
     assert not dev.violations, dev.violations[:5]

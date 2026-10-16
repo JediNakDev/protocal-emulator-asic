@@ -545,7 +545,7 @@ Both engines may use the same page.
 Reset selects page 0 for both.
 The Host addresses all 128 entries through `IMEM_ADDR`.
 A Host write to `EXECCFG` sets both pages; it must then set the PC with a forced `jmp` before the engine runs, because the instruction already fetched at PC came from the old page.
-A restart (`CTRL`) does not change either page.
+A restart (`CMD` bits 0-1) does not change either page.
 An instruction issues with the memory contents at the start of its cycle.
 A write takes effect at the end of the cycle that carries it, so every instruction issued after that cycle sees it, also on a running engine.
 

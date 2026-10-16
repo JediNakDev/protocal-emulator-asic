@@ -33,6 +33,8 @@ Comments start with ';' or '//'. Numbers may be decimal, 0x or 0b.
 import re
 from dataclasses import dataclass, field
 
+# Opcodes, bits 15:13; `jmp` uses 00x, with bit 13 as part of its condition.
+OP_JMP, OP_WAIT, OP_IN, OP_OUT, OP_PUSH_PULL_IRQ, OP_MOV, OP_SET = 0, 2, 3, 4, 5, 6, 7
 JMP_COND = {"": 0, "!x": 1, "x--": 2, "!y": 3, "y--": 4, "x!=y": 5, "pin": 6, "!osre": 7}
 WAIT_SRC = {"gpio": 0, "pin": 1, "flag": 2, "pattern": 3}
 IN_SRC = {
@@ -108,7 +110,7 @@ class Program:
                 work.append(i)
             i = work.pop()
             w = words[i]
-            jp = {w & 1} if w >> 13 == 7 and (w >> 5) & 7 == 3 else state[i]
+            jp = {w & 1} if _is_set_page(w) else state[i]
             if _ends_flow(w):
                 continue
             if i != self.wrap and (i + offset) % PAGE_SIZE == top:
@@ -137,7 +139,7 @@ class Program:
         """Memory address (0-127) of a label for a program loaded at `offset`."""
         return self.labels[name] + offset
 
-    def label_at(self, index, offset=0):
+    def page_address(self, index, offset=0):
         """Page address of instruction `index` for a program loaded at `offset`."""
         return (index + offset) % PAGE_SIZE
 
@@ -234,15 +236,19 @@ def assemble(text):
                    side_pindirs, origin, defines, pages)
 
 
+def _is_set_page(word):
+    return word >> 13 == OP_SET and (word >> 5) & 7 == SET_DEST["page"]
+
+
 def _ends_flow(word):
     """Whether execution never falls through `word` to the next address:
     an unconditional `jmp`, or `out pc` / `mov pc`."""
     op = word >> 13
-    if op == 0 and (word >> 6) & 3 == 0:
+    if op == OP_JMP and (word >> 6) & 3 == JMP_COND[""]:  # condition 0: bit 13 is 0 too
         return True
-    if op == 4 and (word >> 4) & 15 == 5:
+    if op == OP_OUT and (word >> 4) & 15 == OUT_DEST["pc"]:
         return True
-    return op == 6 and (word >> 5) & 7 == 5
+    return op == OP_MOV and (word >> 5) & 7 == MOV_DEST["pc"]
 
 
 def _encode(line, labels, defines, side_count, side_opt):
@@ -267,7 +273,7 @@ def _encode(line, labels, defines, side_count, side_opt):
 
     reloc = None
     if op == "nop":
-        base = (6 << 13) | (2 << 5) | 2
+        base = (OP_MOV << 13) | (MOV_DEST["y"] << 5) | MOV_SRC["y"]
     elif op == "jmp":
         toks = args.split()
         if len(toks) == 1:
@@ -284,7 +290,7 @@ def _encode(line, labels, defines, side_count, side_opt):
             reloc = ("jmp", target)
         else:
             addr = _num(target, defines)
-        base = ((c >> 2) << 13) | ((c & 3) << 6) | (addr & 0x3F)
+        base = ((OP_JMP | c >> 2) << 13) | ((c & 3) << 6) | (addr & 0x3F)
     elif op == "wait":
         toks = args.split()
         timed = bool(toks) and toks[-1].lower() == "timeout"
@@ -308,22 +314,22 @@ def _encode(line, labels, defines, side_count, side_opt):
             idx = _num(toks[2], defines)
             if not 0 <= idx < WAIT_INDEX_LIMIT[src]:
                 raise AsmError(f"wait {src} index {idx} out of range")
-        base = (2 << 13) | (pol << 7) | (WAIT_SRC[src] << 5) | (int(timed) << 4) | idx
+        base = (OP_WAIT << 13) | (pol << 7) | (WAIT_SRC[src] << 5) | (int(timed) << 4) | idx
     elif op == "in":
         src, n = a[0].lower(), _num(a[1], defines)
         if src not in IN_SRC or not 1 <= n <= 16:
             raise AsmError(f"bad in: {line}")
-        base = (3 << 13) | (IN_SRC[src] << 4) | (n & 15)
+        base = (OP_IN << 13) | (IN_SRC[src] << 4) | (n & 15)
     elif op == "out":
         dst, n = a[0].lower(), _num(a[1], defines)
         if dst not in OUT_DEST or not 1 <= n <= 16:
             raise AsmError(f"bad out: {line}")
-        base = (4 << 13) | (OUT_DEST[dst] << 4) | (n & 15)
+        base = (OP_OUT << 13) | (OUT_DEST[dst] << 4) | (n & 15)
     elif op in ("push", "pull"):
         flag = ("iffull" if op == "push" else "ifempty") in words
         block = 0 if "noblock" in words else 1
         sub = 0 if op == "push" else 1
-        base = (5 << 13) | (sub << 6) | (flag << 5) | (block << 4)
+        base = (OP_PUSH_PULL_IRQ << 13) | (sub << 6) | (flag << 5) | (block << 4)
     elif op == "irq":
         clr, wait = 0, 0
         toks = args.split()
@@ -333,7 +339,7 @@ def _encode(line, labels, defines, side_count, side_opt):
             toks = toks[1:]
         if len(toks) != 1:
             raise AsmError(f"bad irq: {line}")
-        base = (5 << 13) | (2 << 6) | (clr << 5) | (wait << 4) | (_num(toks[0], defines) & 7)
+        base = (OP_PUSH_PULL_IRQ << 13) | (2 << 6) | (clr << 5) | (wait << 4) | (_num(toks[0], defines) & 7)
     elif op == "mov":
         dst, src = a[0].lower(), a[1].lower().replace(" ", "")
         opbits = 0
@@ -347,7 +353,7 @@ def _encode(line, labels, defines, side_count, side_opt):
             srcbits = MOV_SRC[src]
         else:
             raise AsmError(f"bad mov: {line}")
-        base = (6 << 13) | (MOV_DEST[dst] << 5) | (opbits << 3) | srcbits
+        base = (OP_MOV << 13) | (MOV_DEST[dst] << 5) | (opbits << 3) | srcbits
     elif op == "set":
         dst = a[0].lower()
         if dst == "page" and a[1] in labels:
@@ -356,7 +362,7 @@ def _encode(line, labels, defines, side_count, side_opt):
             v = _num(a[1], defines)
         if dst not in SET_DEST or not 0 <= v <= 31 or (dst == "page" and v > 1):
             raise AsmError(f"bad set: {line}")
-        base = (7 << 13) | (SET_DEST[dst] << 5) | v
+        base = (OP_SET << 13) | (SET_DEST[dst] << 5) | v
     else:
         raise AsmError(f"unknown instruction {op}")
 

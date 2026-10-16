@@ -18,6 +18,8 @@ evaluates, and the registers update at the closing edge.
 
 M16 = 0xFFFF
 M32 = 0xFFFFFFFF
+PAGE_SIZE = 64   # instruction memory page: PC, jump targets and wrap bounds
+MEM_SIZE = 2 * PAGE_SIZE
 
 # Opcodes, bits 15:13
 JMP0, JMP1, WAIT, IN, OUT, CTRL, MOV, SET = range(8)
@@ -151,7 +153,7 @@ class Engine:
         # Configuration (engine registers), as reset
         self.clkdiv = 0
         self.wrap_bottom = 0
-        self.wrap_top = 63
+        self.wrap_top = PAGE_SIZE - 1
         self.autopush = self.autopull = self.in_right = self.out_right = False
         self.push_thresh = self.pull_thresh = 0  # 4-bit fields; 0 means 16
         self.out_base, self.out_count = 0, 1     # count 0 means 16
@@ -195,7 +197,7 @@ class Engine:
         return self.osr_count >= self.pull_thr()
 
     def next_instruction(self, imem):
-        return self.exec_instr if self.exec_valid else imem[self.page * 64 + self.pc]
+        return self.exec_instr if self.exec_valid else imem[self.page * PAGE_SIZE + self.pc]
 
     def side_fields(self, sd):
         """(side-set enabled, value, delay) from instruction bits 12:8."""
@@ -277,7 +279,7 @@ class Engine:
                 else:
                     taken = not self.osr_empty()
                 if taken:
-                    jump = instr & 63
+                    jump = instr % PAGE_SIZE
             elif op == WAIT:
                 pol = _bit(instr, 7)
                 src = (instr >> 5) & 3
@@ -348,7 +350,7 @@ class Engine:
                     elif f == OUT_PINDIRS:
                         pin_dir = write_range(pin_dir, self.out_base, _count(self.out_count, 16), data)
                     elif f == OUT_PC:
-                        jump = (self.jmp_base + data) & 63
+                        jump = (self.jmp_base + data) % PAGE_SIZE
                     elif f == OUT_ISR:
                         isr, isr_count = data, nb
                     elif f == OUT_EXEC:
@@ -423,7 +425,7 @@ class Engine:
                 elif dst == 4:
                     exec_new = v
                 elif dst == 5:
-                    jump = v & 63
+                    jump = v % PAGE_SIZE
                 elif dst == 6:
                     isr, isr_count = v, 0
                 else:
@@ -463,7 +465,7 @@ class Engine:
                     n["pc"] = jump
                     n["page"] = self.jpage
                 elif not self.exec_valid:
-                    n["pc"] = self.wrap_bottom if self.pc == self.wrap_top else (self.pc + 1) & 63
+                    n["pc"] = self.wrap_bottom if self.pc == self.wrap_top else (self.pc + 1) % PAGE_SIZE
                 n["exec_valid"] = exec_new is not None
                 if exec_new is not None:
                     n["exec_instr"] = exec_new & M16
@@ -548,7 +550,7 @@ class G2:
 
 class Chip:
     def __init__(self):
-        self.imem = [0] * 128
+        self.imem = [0] * MEM_SIZE
         self.engines = [Engine(0), Engine(1)]
         self.g2 = G2()
         self.enable = 0          # CTRL bits 1:0

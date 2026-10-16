@@ -16,7 +16,7 @@ from pe.asm import assemble  # noqa: E402
 
 HALF = 4     # HSCK half period in clk cycles, the specified minimum
 
-# Clock profiles (docs/protocols.md#clock-profiles): the board clock each
+# Clock profiles (docs/design-review.md#clocks): the board clock each
 # program is written for. Tests derive every program setting from the
 # profile, and peers keep their own rates in absolute time, so running the
 # chip at another clock makes the wire timing wrong and the peers fail.
@@ -226,8 +226,8 @@ class Chip:
         `offset` is the memory address (0-127); its page goes to EXECCFG bit 7."""
         page = offset // 64
         await self.ereg(e, regs.CLKDIV, [clkdiv & 0xFF, clkdiv >> 8,
-                                         prog.label_at(prog.wrap_target, offset),
-                                         prog.label_at(prog.wrap, offset)])
+                                         prog.page_address(prog.wrap_target, offset),
+                                         prog.page_address(prog.wrap, offset)])
         await self.ereg(e, regs.SHIFTCTRL, [shiftctrl, thresh,
                                             (out_base & 15) | ((out_count & 15) << 4),
                                             (set_base & 15) | ((set_count & 7) << 4),

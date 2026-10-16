@@ -7,8 +7,8 @@ The full behavior is defined in [the specification](spec.md).
 Each engine reads and drives 13 protocol pins with cycle-exact timing.
 It has PIO-style instructions (`jmp`, `wait`, `in`, `out`, `push`, `pull`, `irq`, `mov`, `set`), side-set and delay, shift registers with automatic refill and drain, and an integer clock divider.
 Each engine owns 8 words of buffering that can act as transmit queue, receive queue or RAM.
-Instruction set version 2 adds waits with deadlines and shift-count reads.
-Receive programs use these general operations for bounded USB replies, CAN resynchronization and exact message boundaries; [the design review](design-review.md) tracks the remaining mandatory protocol gaps.
+Instruction set version 3 (register `VERSION`) has timed waits, which give up after a set number of checks, and shift-count reads; programs over 64 instructions cross pages with `set page`, and the bit state machine can emit its decoded bits into the engine that does not own it.
+Programs use these general operations for bounded USB replies, CAN resynchronization and acknowledgement, and exact message boundaries; [the design review](design-review.md) tracks the remaining mandatory protocol gaps.
 
 General building blocks extend what the programs can do, without any protocol-specific hardware:
 
@@ -50,6 +50,6 @@ On the demo board, the RP2040 acts as Host:
 ## External hardware
 
 Protocol pins `P0`-`P7` are bidirectional and support push-pull or open-drain drive.
-Lines that must idle high (UART TX, I2C, USB) need external pull-ups on these pins, because every pin is released after reset.
+Lines that must idle high (UART TX, SPI CS_N, I2C, USB) need external pull-ups on these pins, because every pin is released after reset.
 `P8` and `P9` are inputs only, and `P10`-`P12` are outputs only that drive 0 after reset.
 I2C needs pull-up resistors on SDA and SCL.

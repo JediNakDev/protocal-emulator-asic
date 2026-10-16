@@ -87,9 +87,11 @@ def command(packet_bits, reply, deadline=REPLY_DEADLINE):
     return words
 
 
-def reset(ms=10.0):
-    """Command word for a bus reset: SE0 for at least `ms` milliseconds
-    (USB 2.0 section 7.1.7.5 requires 10 ms), then J."""
+def reset(ms=50.0):
+    """Command word for a bus reset: SE0 for at least `ms` milliseconds,
+    then J. The chip drives the device directly, as a root port, for which
+    USB 2.0 section 7.1.7.5 requires at least 50 ms (TDRSTR); the 10 ms
+    TDRST minimum applies to a hub's downstream port."""
     units = -(-round(ms * 1e-3 / TICK_S) // RESET_UNIT_TICKS)
     assert 0 < units <= 256
     return [(units - 1) | 0x8000]

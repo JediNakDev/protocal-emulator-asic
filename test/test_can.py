@@ -11,7 +11,7 @@ from cocotb.triggers import Event, First
 from chip import MHZ_50, Chip, assemble, fails_at_wrong_clock, program_source, regs
 from pe import g2 as g2lib
 from pe.proto import can
-from peers import Wave, now_ns, sleep_until
+from peers import Wave, now_ns, sleep_ns, sleep_until
 
 PROFILE = MHZ_50
 TXD, RXD = 0, 8
@@ -90,7 +90,8 @@ def value_of(bits):
 
 class CanNode:
     """A CAN 2.0B node: transmits with arbitration, receives, and
-    acknowledges good frames. It hard-synchronizes on a start of frame and,
+    acknowledges good frames. A dominant CRC delimiter, ACK delimiter or
+    end of frame bit is a form error, which it reports as a violation. It hard-synchronizes on a start of frame and,
     while receiving, resynchronizes on recessive-to-dominant edges by up to
     SJW_NS; an edge further than that from its bit boundary is a timing
     violation. Its bit time may differ from the nominal one. A frame to
@@ -124,7 +125,9 @@ class CanNode:
             self.bus.update()
 
     @staticmethod
-    def _frame_bits(tx):
+    def frame_bits(tx):
+        """The bits a node sends for `tx` on the bus, stuffed, from the start
+        of frame to the end of frame or the error delimiter."""
         dlc = len(tx.data) if tx.dlc is None else tx.dlc
         b = [0]
         if tx.ext:
@@ -158,7 +161,7 @@ class CanNode:
         self.done = False
         if transmit:
             self.tx_frame = self.pending.pop(0)
-            self.tx_bits = self._frame_bits(self.tx_frame)
+            self.tx_bits = self.frame_bits(self.tx_frame)
             self.arb_end = 32 if self.tx_frame.ext else 12
             self.transmitting = True
 
@@ -204,8 +207,13 @@ class CanNode:
             if n == self.need:
                 self._frame_done(k)
             return
-        if k == self.crc_end + 2 and self.transmitting:
-            self.sent.append((self.tx_frame.ident, b == 0))
+        if k == self.crc_end + 2:
+            if self.transmitting:
+                self.sent.append((self.tx_frame.ident, b == 0))
+        elif b == 0:  # form error: the delimiters and end of frame are recessive
+            field = "CRC delimiter" if k == self.crc_end + 1 else (
+                "ACK delimiter" if k == self.crc_end + 3 else "end of frame")
+            self.violations.append(f"dominant {field} in bit {k}")
         if k == self.crc_end + 10:
             self.done = True
 
@@ -355,13 +363,13 @@ OFFSET_PAYLOADS = [
 ]
 
 
-async def receive_with_offset(dut, bit_ns):
+async def receive_with_offset(dut, bit_ns, hz=PROFILE):
     node = CanNode(bit_ns)
-    chip = await setup_listen(dut, node)
+    chip = await setup_listen(dut, node, hz)
     for ident, data in OFFSET_PAYLOADS:
         node.send(ident, data)
     frames = await receive_frames(chip, len(OFFSET_PAYLOADS))
-    assert frames == [(i, d, True) for i, d in OFFSET_PAYLOADS], frames
+    assert frames == [(i, d, True) for i, d in OFFSET_PAYLOADS], f"received frames {frames}"
 
 
 @cocotb.test()
@@ -375,6 +383,14 @@ async def test_can_receive_clock_offset(dut):
 async def test_can_receive_clock_offset_fast(dut):
     """...and 1.5% fast."""
     await receive_with_offset(dut, BIT_NS * 0.985)
+
+
+@cocotb.test()
+async def test_can_receive_wrong_clock(dut):
+    """At 40 MHz the 50 MHz receiver samples every 1.25 us, so across the
+    stretches without an edge it skips bits of the 1 Mbit/s frames."""
+    msg = await fails_at_wrong_clock(lambda hz: receive_with_offset(dut, BIT_NS, hz), PROFILE)
+    assert "received frames" in msg or "got" in msg, msg
 
 
 # ------------------------------------------------------------------ node
@@ -465,14 +481,19 @@ NODE_FRAMES = [
 ]
 
 
-async def node_acks(dut, bit_ns=BIT_NS):
+# With a clock offset, also the frames with the longest stretches between
+# resynchronizing edges.
+OFFSET_FRAMES = NODE_FRAMES + [Tx(i, d) for i, d in OFFSET_PAYLOADS]
+
+
+async def node_acks(dut, bit_ns=BIT_NS, frames=NODE_FRAMES):
     peer = CanNode(bit_ns)
     chip = await setup_node(dut, [peer])
-    for tx in NODE_FRAMES:
+    for tx in frames:
         peer.pending.append(tx)
-    frames = await node_frames(chip, len(NODE_FRAMES))
-    assert frames == [frame(tx) for tx in NODE_FRAMES], frames
-    assert peer.sent == [(tx.ident, True) for tx in NODE_FRAMES], peer.sent
+    got = await node_frames(chip, len(frames))
+    assert got == [frame(tx) for tx in frames], got
+    assert peer.sent == [(tx.ident, True) for tx in frames], peer.sent
     assert not peer.violations, peer.violations[:5]
 
 
@@ -484,14 +505,15 @@ async def test_can_node_acks(dut):
 
 @cocotb.test()
 async def test_can_node_acks_clock_offset(dut):
-    """...by a transmitter 1.5% slow..."""
-    await node_acks(dut, BIT_NS * 1.015)
+    """...by a transmitter 1.5% slow, also after ten bits without an edge to
+    resynchronize on..."""
+    await node_acks(dut, BIT_NS * 1.015, OFFSET_FRAMES)
 
 
 @cocotb.test()
 async def test_can_node_acks_clock_offset_fast(dut):
     """...and one 1.5% fast."""
-    await node_acks(dut, BIT_NS * 0.985)
+    await node_acks(dut, BIT_NS * 0.985, OFFSET_FRAMES)
 
 
 @cocotb.test()
@@ -516,7 +538,7 @@ async def test_can_node_error_recovery(dut):
     acknowledges the next frame, which begins with a recessive bit."""
     peer = CanNode()
     chip = await setup_node(dut, [peer])
-    stuff_after_crc = len(CanNode._frame_bits(Tx(0x104))) - 11
+    stuff_after_crc = len(CanNode.frame_bits(Tx(0x104))) - 11
     broken = [Tx(0x2AA, b"\x12\x34", error_at=6), Tx(0x2AB, b"\x5a" * 8, error_at=40),
               Tx(0x104, error_at=stuff_after_crc)]
     good = Tx(0x4AC, b"\x56")
@@ -564,6 +586,25 @@ async def test_can_node_transmit_clock_offset(dut):
 async def test_can_node_transmit_clock_offset_fast(dut):
     """...and one 1.5% fast."""
     await transmit_session(dut, bit_ns=BIT_NS * 0.985)
+
+
+@cocotb.test()
+async def test_can_node_transmit_host_pause(dut):
+    """The 8-word transmit queue holds 32 bits: a Host that queues the first
+    8 words of a long frame and then pauses for 24 us loses nothing. (A
+    queue that runs dry inside a frame is open gap B14.)"""
+    peer = CanNode()
+    chip = await setup_node(dut, [peer])
+    tx = Tx(0x1ABCDEF, bytes(range(0xF8, 0x100)), ext=True)
+    words = can.node_tx_words(tx.ident, tx.data, ext=True)
+    assert len(words) > 16, len(words)
+    await chip.push(0, words[:8])
+    await chip.write(regs.FLAG_SET, 1 << 3)
+    await sleep_ns(24_000)
+    await chip.stream(0, words[8:], 0, depth=8)
+    assert await node_frames(chip, 1) == [frame(tx)]
+    assert peer.received == [Rx(tx.ident, tx.data, True, True, False, 8)], peer.received
+    assert not peer.violations, peer.violations[:5]
 
 
 @cocotb.test()
