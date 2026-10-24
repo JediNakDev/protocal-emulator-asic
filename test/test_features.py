@@ -208,6 +208,36 @@ async def test_g2_nrzi_decode_into_isr(dut):
 
 
 @cocotb.test()
+async def test_g2_emit_into_other_engine(dut):
+    """G2_CTRL bit 5: engine 1 owns G2 and feeds it, and the emitted bits
+    enter engine 0's ISR and checksum register instead of engine 1's."""
+    chip = await new_chip(dut)
+    feeder = await chip.load("out g2, 1", 0)
+    await chip.setup_engine(1, feeder, 0, shiftctrl=regs.AUTOPULL | regs.OUT_RIGHT)
+    sink = await chip.load("idle: jmp idle", 64)
+    await chip.setup_engine(0, sink, 64, shiftctrl=regs.AUTOPUSH | regs.IN_RIGHT
+                            | regs.fifo_mode(regs.FIFO_JOIN_RX))
+    await chip.write32(regs.engine_reg(0, regs.LFSR_POLY), 0xA001)
+    await chip.write32(regs.engine_reg(0, regs.LFSR_VALUE), 0xFFFF)
+    await chip.ereg(0, regs.LFSRCFG, regs.LFSR_FEED_IN | regs.LFSR_CRC | regs.LFSR_RIGHT)
+    # One state: emit the feed bit on every step.
+    await chip.write(regs.G2_ADDR, 0)
+    await chip.write(regs.G2_DATA, g2lib.build(lambda state, in0, in1: g2lib.Step(out0=in0, emit=True)))
+    await chip.write(regs.G2_IN0, [regs.G2_SRC_FEED_BIT, 0, 0])
+    await chip.write(regs.G2_CTRL, regs.G2_ENABLE | regs.G2_OWNER1 | regs.G2_STEP_FEED
+                     | regs.G2_EMIT | regs.G2_EMIT_OTHER)
+    words = [0x1234, 0xBEEF, 0x0F0F]
+    await chip.push(1, words)
+    await chip.enable(3)
+    await chip.cycles(16 * len(words) * 2 + 40)
+    await chip.enable(0)
+    assert await chip.levels(1) == (0, 0), "the owner receives nothing"
+    assert await chip.pop(0, len(words)) == words
+    crc = await chip.read32(regs.engine_reg(0, regs.LFSR_VALUE))
+    assert (crc & 0xFFFF) ^ 0xFFFF == crc16_usb(to_bits(words))
+
+
+@cocotb.test()
 async def test_capture_and_overrun(dut):
     """G3: edge timestamps from the global counter, flag and overrun."""
     chip = await new_chip(dut)

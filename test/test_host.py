@@ -179,3 +179,107 @@ async def test_empty_fifo_read_during_arrival(dut, quad, arrival_byte, engine):
     assert await chip.read8(regs.STICKY) == regs.STK_RX_UNF0 << engine
     assert await chip.pop(engine) == [0xFFE0]
     assert await chip.levels(engine) == (0, 0)
+
+
+async def receive_stream(dut, period, words, pause=0):
+    """An engine pushes a counter word every `period` cycles into the 8-word
+    receive queue, dropping words when it is full; the Host polls LEVELS and
+    reads what is there in one burst, at the fastest HSCK (f_clk / 8) in
+    4-bit mode, idling `pause` cycles after each burst. Returns
+    (words lost, words read)."""
+    chip = Chip(dut)
+    await chip.start()
+    await chip.set_quad()
+    clkdiv = next(c for c in range(16) if period % (c + 1) == 0 and period // (c + 1) - 2 <= 31)
+    d = period // (clkdiv + 1) - 2
+    prog = await chip.load(f".wrap_target\n in count, 16\n push noblock [{d}]\n.wrap")
+    await chip.setup_engine(0, prog, clkdiv=clkdiv, shiftctrl=regs.fifo_mode(regs.FIFO_JOIN_RX))
+    await chip.enable(1)
+    got = []
+    while len(got) < words:
+        _, rx = await chip.levels(0)
+        if rx:
+            got += await chip.pop(0, rx)
+            if pause:
+                await chip.cycles(pause)
+    await chip.enable(0)
+    lost = sum(((b - a) & 0xFFFF) // period - 1 for a, b in zip(got, got[1:]))
+    overflow = bool((await chip.read8(regs.STICKY)) & regs.STK_RX_OVF0)
+    assert overflow == (lost > 0), "receive overflow must report every loss"
+    return lost, len(got)
+
+
+@cocotb.test()
+async def test_host_receive_throughput(dut):
+    """Sustained rate and burst absorption of the receive path through the
+    Host port: with this Host's transactions (a LEVELS poll, then one
+    burst read) a word every 44 cycles is sustained and one every 42 is not;
+    at a word every 100 cycles the queue absorbs a 400-cycle pause after
+    each burst, but not 600: its 8 words cover 800 cycles, and reading them
+    takes about 330."""
+    assert (await receive_stream(dut, 44, 600))[0] == 0
+    assert (await receive_stream(dut, 42, 600))[0] > 0
+    assert (await receive_stream(dut, 100, 200, pause=400))[0] == 0
+    assert (await receive_stream(dut, 100, 200, pause=600))[0] > 0
+
+
+async def duplex_stream(dut, period, words=300):
+    """Measure polling, receive bursts and transmit bursts together.
+
+    The pin peer observes each transmit byte independently; receive words
+    contain timestamps, so skipped production periods reveal receive loss.
+    Nonblocking pulls output zero when the Host cannot keep up.
+    """
+    chip = Chip(dut)
+    await chip.start()
+    await chip.set_quad()
+    clkdiv = 3
+    delay = period // (clkdiv + 1) - 4
+    assert period % (clkdiv + 1) == 0 and 0 <= delay <= 31
+    prog = await chip.load(f"""
+        .wrap_target
+        in count, 16
+        push noblock
+        pull noblock
+        out pins, 16 [{delay}]
+        .wrap
+    """)
+    await chip.setup_engine(0, prog, clkdiv=clkdiv, out_count=8)
+    await chip.force_asm(0, "mov pindirs, ~null")
+    for pin in range(8):
+        await chip.pincfg(pin, regs.DRIVE_PUSH_PULL)
+    tx = [i % 255 + 1 for i in range(words)]
+    await chip.push(0, tx[:4])
+    observed = []
+    watching = True
+
+    async def peer():
+        previous = 0
+        while watching:
+            await chip.cycles(1)
+            value = int(dut.uio_out.value) & 0xFF
+            if value != previous:
+                observed.append(value)
+                previous = value
+
+    task = cocotb.start_soon(peer())
+    await chip.enable(1)
+    rx = await chip.stream(0, tx[4:], words)
+    await chip.cycles(2 * period)
+    await chip.enable(0)
+    watching = False
+    await task
+    assert [v for v in observed if v] == tx, "transmitted words lost or reordered"
+    lost = sum(((b - a) & 0xFFFF) // period - 1 for a, b in zip(rx, rx[1:]))
+    sticky = await chip.read8(regs.STICKY)
+    assert bool(sticky & regs.STK_RX_OVF0) == (lost > 0)
+    assert not sticky & regs.STK_TX_OVF0
+    return lost, 0 in observed[:-1]
+
+
+@cocotb.test()
+async def test_host_duplex_throughput(dut):
+    """A measured sustainable duplex profile and a failing faster control."""
+    assert await duplex_stream(dut, 128) == (0, False)
+    lost, starved = await duplex_stream(dut, 64)
+    assert lost > 0 or starved, "the overload control must expose service limits"

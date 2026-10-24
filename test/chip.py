@@ -7,14 +7,22 @@ import sys
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, RisingEdge
+from cocotb.utils import get_sim_time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
 
 from pe import regs  # noqa: E402
 from pe.asm import assemble  # noqa: E402
 
-CLK_NS = 20  # 50 MHz
 HALF = 4     # HSCK half period in clk cycles, the specified minimum
+
+# Clock profiles (docs/design-review.md#clocks): the board clock each
+# program is written for. Tests derive every program setting from the
+# profile, and peers keep their own rates in absolute time, so running the
+# chip at another clock makes the wire timing wrong and the peers fail.
+MHZ_50, MHZ_48, MHZ_40 = 50_000_000, 48_000_000, 40_000_000
+# The clock a negative control runs a profile's program at instead.
+WRONG_HZ = {MHZ_50: MHZ_40, MHZ_48: MHZ_50, MHZ_40: MHZ_50}
 
 HCS_N, HSCK = 0, 1
 
@@ -27,10 +35,34 @@ def program_source(name):
         return f.read()
 
 
+async def fails_at_wrong_clock(session, profile_hz, wrong_hz=None):
+    """Negative control: `session(hz)` runs a program written for profile_hz
+    on a chip clocked at `wrong_hz` (default WRONG_HZ[profile_hz]) and must
+    fail; returns the failure message, so the caller can check that the
+    expected check caught it."""
+    hz = wrong_hz or WRONG_HZ[profile_hz]
+    try:
+        await session(hz)
+    except (AssertionError, TimeoutError) as e:
+        return str(e)
+    raise AssertionError(f"passed at {hz} Hz, a program for {profile_hz} Hz")
+
+
+def period_ps(hz):
+    """Clock period in ps, rounded to an even number (the simulator's clock
+    driver needs equal half periods): 48 MHz runs at 47.998 MHz."""
+    return 2 * round(1e12 / hz / 2)
+
+
+def now_ns():
+    return get_sim_time("ps") / 1000
+
+
 class Chip:
-    def __init__(self, dut, clk_ps=CLK_NS * 1000):
+    def __init__(self, dut, hz=MHZ_50):
         self.dut = dut
-        self.clk_ps = clk_ps
+        self.hz = hz
+        self.clk_ps = period_ps(hz)
         self.quad = False
         self.ui = 0x01  # HCS_N high
         # Shadows: cocotb applies writes later, so reading back a signal
@@ -40,7 +72,14 @@ class Chip:
 
     # ------------------------------------------------------------- basics
     async def start(self):
-        cocotb.start_soon(Clock(self.dut.clk, self.clk_ps, unit="ps").start())
+        # One clock driver per test: a test that resets the chip again keeps
+        # it, or replaces it when the period changes.
+        running = getattr(self.dut, "_pe_clock", None)
+        if running is None or running[0] != self.clk_ps or running[1].done():
+            if running is not None:
+                running[1].cancel()
+            task = cocotb.start_soon(Clock(self.dut.clk, self.clk_ps, unit="ps").start())
+            self.dut._pe_clock = (self.clk_ps, task)
         self.dut.ena.value = 1
         self.dut.ext_oe.value = 0
         self.dut.ext_out.value = 0
@@ -183,14 +222,17 @@ class Chip:
     async def setup_engine(self, e, prog, offset=0, clkdiv=0, shiftctrl=0, thresh=0,
                            out_base=0, out_count=1, set_base=0, set_count=1, in_base=0,
                            jmp_pin=0, side_base=0, execcfg=0, statuscfg=0):
-        """Configure engine `e` for a loaded Program and jump to its start."""
+        """Configure engine `e` for a loaded Program and jump to its start.
+        `offset` is the memory address (0-127); its page goes to EXECCFG bit 7."""
+        page = offset // 64
         await self.ereg(e, regs.CLKDIV, [clkdiv & 0xFF, clkdiv >> 8,
-                                         prog.wrap_target + offset, prog.wrap + offset])
+                                         prog.page_address(prog.wrap_target, offset),
+                                         prog.page_address(prog.wrap, offset)])
         await self.ereg(e, regs.SHIFTCTRL, [shiftctrl, thresh,
                                             (out_base & 15) | ((out_count & 15) << 4),
                                             (set_base & 15) | ((set_count & 7) << 4),
                                             (in_base & 15) | ((jmp_pin & 15) << 4),
-                                            prog.sidepin(side_base), execcfg, statuscfg])
+                                            prog.sidepin(side_base), execcfg | page << 7, statuscfg])
         await self.write(regs.CMD, regs.CMD_RESTART0 << e)
         await self.force(e, offset & 0x3F)  # jmp to the program start
 

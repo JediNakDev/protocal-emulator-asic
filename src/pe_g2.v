@@ -31,6 +31,7 @@ module pe_g2 (
   reg       en;
   reg [1:0] mode;
   reg       emit_en;
+  reg       emit_other;  // deliver to the engine that does not own G2
   reg [4:0] in0_sel, in1_sel;
   reg [3:0] state;
   reg       feed_bit;
@@ -95,6 +96,7 @@ module pe_g2 (
       owner     <= 1'b0;
       mode      <= 2'd0;
       emit_en   <= 1'b0;
+      emit_other <= 1'b0;
       in0_sel   <= 5'd0;
       in1_sel   <= 5'd0;
       state     <= 4'd0;
@@ -128,6 +130,7 @@ module pe_g2 (
             owner   <= bus_wdata[1];
             mode    <= bus_wdata[3:2];
             emit_en <= bus_wdata[4];
+            emit_other <= bus_wdata[5];
           end
           5'h0F: in0_sel <= bus_wdata[4:0];
           5'h10: in1_sel <= bus_wdata[4:0];
@@ -143,14 +146,15 @@ module pe_g2 (
     end
   end
 
-  assign emit = {emit_v & owner, emit_v & ~owner};
+  wire emit_to = owner ^ emit_other;
+  assign emit = {emit_v & emit_to, emit_v & ~emit_to};
 
   always @(*) begin
     bus_rdata = 8'h00;
     if (bus_addr[6:5] == 2'b00) begin
       case (bus_addr[4:0])
         5'h0C: bus_rdata = {2'd0, taddr};
-        5'h0E: bus_rdata = {3'd0, emit_en, mode, owner, en};
+        5'h0E: bus_rdata = {2'd0, emit_other, emit_en, mode, owner, en};
         5'h0F: bus_rdata = {3'd0, in0_sel};
         5'h10: bus_rdata = {3'd0, in1_sel};
         5'h11: bus_rdata = {1'b0, feed_full, out, state};

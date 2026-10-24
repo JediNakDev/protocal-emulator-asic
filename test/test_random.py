@@ -43,11 +43,14 @@ def random_instr(rng, toggling):
     blocking forms are rare, since nobody feeds or drains the queues, and
     most waits are on pins that the board toggles."""
     sd = 0 if rng.random() < 0.5 else rng.getrandbits(5)
-    op = rng.choices(range(8), [9, 9, 2, 12, 14, 8, 18, 22])[0]
+    op = rng.choices(range(8), [9, 9, 3, 12, 14, 8, 18, 22])[0]
     lo = rng.getrandbits(8)
     if op == 2:
         src = rng.choices(range(4), [6, 2, 1, 1])[0]
         lo = (lo & 0x9F) | (src << 5)
+        if src != 3 and rng.random() < 0.5:  # timed, with a short count
+            lo |= 0x10
+            sd = rng.choice([sd, 0])
         if src == 0 and toggling:
             lo = (lo & 0xE0) | rng.choice(toggling)
     elif op == 4 and lo >> 4 == 9 and rng.random() < 0.8:  # `out g2` blocks once the feed fills
@@ -64,7 +67,7 @@ def random_setup(rng):
     s["g2_table"] = [rng.getrandbits(8) for _ in range(64)]
     s["g2_in"] = [rng.randrange(18) if rng.random() < 0.9 else rng.getrandbits(5) for _ in range(2)]
     s["g2_state"] = rng.getrandbits(6)
-    s["g2_ctrl"] = rng.getrandbits(5) if rng.random() < 0.7 else 0
+    s["g2_ctrl"] = rng.getrandbits(6) if rng.random() < 0.7 else 0
     s["negsel"] = rng.getrandbits(4)
     s["pincfg"] = []
     for i in range(13):
@@ -73,7 +76,12 @@ def random_setup(rng):
         flt = rng.getrandbits(2) if rng.random() < 0.3 else 0  # mostly unfiltered
         s["pincfg"].append(owner | (drive << 2) | (rng.getrandbits(2) << 4) | (flt << 6))
     toggling = [i for i in range(8) if (s["pincfg"][i] >> 2) & 3 in (0, 2)] + [8, 9]
-    s["imem"] = [random_instr(rng, toggling) for _ in range(64)]
+    s["imem"] = [random_instr(rng, toggling) for _ in range(128)]
+    # Load a short count before most timed waits, so they also time out.
+    for i in range(1, 128):
+        w = s["imem"][i]
+        if w >> 13 == 2 and w & 0x10 and rng.random() < 0.7:
+            s["imem"][i - 1] = 0xE000 | (1 << 5) | rng.randrange(32)  # set x, n
     # Instruction memory writes while the engines run: (engine whose PC picks
     # the address, offset from that PC or None for a random address, word).
     s["imem_writes"] = [(rng.getrandbits(1), rng.choice([0, 0, 1, 1, 2, None]), random_instr(rng, toggling))
@@ -92,10 +100,12 @@ def random_setup(rng):
         setpin = base() | (rng.getrandbits(3) << 4)
         sidepin = base() | (rng.choices(range(4), [1, 3, 2, 2])[0] << 4) | (rng.getrandbits(2) << 6)
         e = {
-            "x": rng.getrandbits(16), "y": rng.getrandbits(16), "start": rng.randrange(64),
+            # Small X values let timed waits run out within the run.
+            "x": rng.getrandbits(16) if rng.random() < 0.3 else rng.randrange(48),
+            "y": rng.getrandbits(16), "start": rng.randrange(64),
             "regs": [rng.choice([0, 0, 0, 1, 2, 3]), 0, rng.randrange(64), rng.randrange(64)]
                     + [shiftctrl(rng), rng.getrandbits(8), outpin, setpin,
-                       rng.getrandbits(8), sidepin, rng.getrandbits(7), rng.getrandbits(5),
+                       rng.getrandbits(8), sidepin, rng.getrandbits(8), rng.getrandbits(5),
                        rng.getrandbits(5), rng.getrandbits(7), rng.getrandbits(3)],
             "poly": rng.getrandbits(32), "lfsr": rng.getrandbits(32),
             "entries": [rng.getrandbits(16) for _ in range(8)],
@@ -115,7 +125,7 @@ def shiftctrl(rng):
 def calibration_setup():
     """Engine 0: `set pins, 1` on pin 10, then `in count, 16` and `push`."""
     s = random_setup(random.Random(0))
-    s["imem"] = [0xE001, 0x6050, 0xA010, 0x0003] + [0x0003] * 60
+    s["imem"] = [0xE001, 0x6050, 0xA010, 0x0003] + [0x0003] * 124
     s["g2_ctrl"] = 0
     s["pincfg"] = [0] * 10 + [0x0C, 0, 0]  # pin 10: engine 0, always drive
     s["flags"] = 0
@@ -262,6 +272,7 @@ def model_for(s, counter, latency):
         eng.side_base, eng.side_count = r[9] & 15, (r[9] >> 4) & 3
         eng.side_opt, eng.side_dirs = bool(r[9] & 0x40), bool(r[9] & 0x80)
         eng.jmp_base, eng.jmp_pattern = r[10] & 63, bool(r[10] & 0x40)
+        eng.page = eng.jpage = r[10] >> 7
         eng.status_n, eng.status_rx = r[11] & 15, bool(r[11] & 0x10)
         eng.lfsr_feed, eng.lfsr_mode, eng.lfsr_right = r[12] & 3, (r[12] >> 2) & 3, bool(r[12] & 0x10)
         eng.cap_pin, eng.cap_edge, eng.cap_flag_en = r[13] & 15, (r[13] >> 4) & 3, bool(r[13] & 0x40)
@@ -296,7 +307,7 @@ def model_run(m, s, stim, latency, watch=()):
         if c == 0:
             settle(m, oe, out, s["pull_up"], ui)
         if c in watch:
-            pcs[c] = [e.pc for e in m.engines]
+            pcs[c] = [(e.page, e.pc) for e in m.engines]
         trace.append(m.cycle(oe, out, s["pull_up"], ui))
     return (trace, pcs) if watch else trace
 
@@ -310,12 +321,14 @@ def place_imem_writes(s, stim, counter, latency):
     effect = [at + latency + 32 for at in IMEM_AT]
     _, pcs = model_run(model_for(s, counter, latency), s, stim, latency, watch=effect)
     for (eng, off, word), c in zip(s["imem_writes"], effect):
-        addr = pcs[c][eng] + off if off is not None else (word * 7) % 64
-        s["imem_at"].append((addr & 63, word))
+        page, pc = pcs[c][eng]
+        addr = page * 64 + (pc + off) % 64 if off is not None else (word * 7) % 128
+        s["imem_at"].append((addr, word))
 
 
 def set_g2_ctrl(m, v):
-    m.g2.enable, m.g2.owner, m.g2.mode, m.g2.emit_en = bool(v & 1), (v >> 1) & 1, (v >> 2) & 3, bool(v & 0x10)
+    m.g2.enable, m.g2.owner, m.g2.mode = bool(v & 1), (v >> 1) & 1, (v >> 2) & 3
+    m.g2.emit_en, m.g2.emit_other = bool(v & 0x10), bool(v & 0x20)
 
 
 def settle(m, oe, out, pull_up, ui):

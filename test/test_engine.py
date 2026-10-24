@@ -372,3 +372,214 @@ async def test_status_source(dut):
     await chip.push(0, [1, 2, 3])
     await chip.force_asm(0, "mov x, status")
     assert await chip.dbg(0, 1) == 0
+
+
+async def pulse_after_wait(chip, wait_line, x, delay_cycles=0, during=None, clkdiv=0):
+    """Run `set pins, 1`, the wait, `set pins, 0` with X preloaded. Returns
+    (high cycles on pin 0, X afterwards). `during(chip)` runs while it waits."""
+    await chip.enable(0)
+    await run_program(chip, f"""
+            set pins, 1
+            {wait_line}
+            set pins, 0
+        halt: jmp halt
+    """, clkdiv=clkdiv)
+    await chip.force_asm(0, f"set pindirs, 1\nset pins, 0\nset x, {x}")
+    await chip.pincfg(0, regs.DRIVE_PUSH_PULL)
+    task = cocotb.start_soon(sample(chip, 200 * (clkdiv + 1), uio_bit(chip, 0)))
+    side = cocotb.start_soon(during(chip)) if during else None
+    await chip.enable(1)
+    if side:
+        await side
+    s = await task
+    high = [length for v, length in runs(s) if v]
+    assert len(high) == 1, runs(s)
+    return high[0], await chip.dbg(0, 1)
+
+
+@cocotb.test()
+async def test_timed_wait(dut):
+    """A timed wait checks once per tick; X counts the checks left and is 0
+    afterwards only if the wait timed out."""
+    chip = await new_chip(dut)
+    chip.set_pin8(0)
+    # Never satisfied: completes on the 20th check, so set + 20 + 1 cycles.
+    assert await pulse_after_wait(chip, "wait 1 gpio 8 timeout", 20) == (21, 0)
+    # Already satisfied: completes on the first check and keeps X.
+    chip.set_pin8(1)
+    assert await pulse_after_wait(chip, "wait 1 gpio 8 timeout", 20) == (2, 20)
+    # X = 0 before the wait: it completes at once, as timed out, even though
+    # the condition holds.
+    assert await pulse_after_wait(chip, "wait 1 gpio 8 timeout", 0) == (2, 0)
+    # The delay applies once, after completion.
+    chip.set_pin8(0)
+    assert await pulse_after_wait(chip, "wait 1 gpio 8 timeout [3]", 5) == (9, 0)
+    # The clock divider scales every check.
+    assert await pulse_after_wait(chip, "wait 1 gpio 8 timeout", 5, clkdiv=2) == (18, 0)
+
+    # Satisfied on check k leaves X = N - k + 1 >= 1, and the wait lasted k
+    # cycles. Pin 8 rises `start` cycles after the peer sees pin 0 rise, so
+    # the first check that sees it is check start + a fixed latency (peer
+    # observation and the 2-cycle input path): every cycle counts once.
+    def rise_after(start):
+        async def rise(chip):
+            while not uio_bit(chip, 0)():
+                await RisingEdge(chip.dut.clk)
+            await chip.cycles(start)
+            chip.set_pin8(1)
+        return rise
+
+    latency = None
+    for start in range(0, 32):
+        chip.set_pin8(0)
+        high, x = await pulse_after_wait(chip, "wait 1 gpio 8 timeout", 30, during=rise_after(start))
+        if latency is None:
+            latency = (30 - x + 1) - start
+            assert 1 <= latency <= 4, latency
+        k = start + latency
+        if k <= 30:
+            assert (high, x) == (k + 1, 30 - k + 1), (start, high, x)
+        else:
+            assert (high, x) == (31, 0), (start, high, x)
+
+
+@cocotb.test()
+async def test_timed_wait_flag_and_reserved(dut):
+    chip = await new_chip(dut)
+    # A satisfied flag wait clears the flag, as without a timeout.
+    await chip.write(regs.FLAG_SET, 0x04)
+    assert await pulse_after_wait(chip, "wait 1 flag 2 timeout", 7) == (2, 7)
+    assert await chip.read8(regs.FLAGS) == 0
+    # A timed-out flag wait leaves the flags alone.
+    assert await pulse_after_wait(chip, "wait 1 flag 2 timeout", 7) == (8, 0)
+    assert await chip.read8(regs.FLAGS) == 0
+    # A timed wait on a disabled engine retries every cycle, as forced.
+    await chip.enable(0)
+    await chip.force_asm(0, "set x, 12")
+    await chip.force_asm(0, "wait 1 flag 5 timeout")
+    await chip.cycles(20)
+    assert await chip.dbg(0, 1) == 0
+    assert not (await chip.dbg(0, 0)) & 0x80, "exec slot empty after the timeout"
+    # A timed pattern wait is reserved and runs as a nop, leaving X alone.
+    await chip.force_asm(0, "jmp 9\nset x, 3\nset y, 1")
+    chip.drive_uio(0, 0)
+    await chip.force(0, 0x40F0)  # wait 1 pattern, timed
+    assert (await chip.dbg(0, 0)) & 0x3F == 9
+    assert await chip.dbg(0, 1) == 3
+
+
+@cocotb.test()
+async def test_count_sources(dut):
+    """mov reads the ISR and OSR counts (operation 3)."""
+    chip = await new_chip(dut)
+    await chip.write(regs.CMD, regs.CMD_RESTART0)
+
+    async def counts():
+        await chip.force_asm(0, "mov x, isrcnt\nmov y, osrcnt")
+        return await chip.dbg(0, 1), await chip.dbg(0, 2)
+
+    assert await counts() == (0, 16), "after restart the OSR is empty"
+    await chip.force_asm(0, "in null, 3\npull noblock\nout null, 5")
+    assert await counts() == (3, 5)
+    await chip.force_asm(0, "in null, 16\nout null, 16")
+    assert await counts() == (16, 16), "counts saturate at 16"
+    await chip.force_asm(0, "push noblock")
+    assert await counts() == (0, 16)
+    # The count lands in any destination, for example as a jump target.
+    await chip.force_asm(0, "in null, 9\nmov pc, isrcnt")
+    assert (await chip.dbg(0, 0)) & 0x3F == 9
+    # Other count sources read 0.
+    await chip.force_asm(0, "set x, 7")
+    await chip.force(0, 0xC000 | (1 << 5) | (3 << 3) | 5)  # mov x, count source 5
+    assert await chip.dbg(0, 1) == 0
+
+
+@cocotb.test()
+async def test_instruction_pages(dut):
+    """Each engine fetches from the page in EXECCFG bit 7: the same page
+    addresses run different programs, jumps and wrap stay in the page, and a
+    Host write while running reaches the page it addresses."""
+    chip = await new_chip(dut)
+    src = """
+        set x, {v}
+    loop:
+        in x, 16
+        push
+        jmp loop
+    """
+    for e, (offset, v) in enumerate(((3, 5), (64 + 3, 9))):
+        prog = await chip.load(src.format(v=v), offset)
+        await chip.setup_engine(e, prog, offset, shiftctrl=regs.fifo_mode(regs.FIFO_JOIN_RX))
+    assert (await chip.eread(1, regs.EXECCFG))[0] == regs.EXECCFG_PAGE1
+    await chip.enable(3)
+    await chip.cycles(40)
+    await chip.enable(0)
+    assert set(await chip.pop(0, 4)) == {5}
+    assert set(await chip.pop(1, 4)) == {9}
+    # Replace `set x` in page 1 only, then rerun both from their starts.
+    await chip.write(regs.IMEM_ADDR, 64 + 3)
+    await chip.write16(regs.IMEM_DATA, [assemble("set x, 17").code[0]])
+    for e in range(2):
+        await chip.write(regs.CMD, regs.CMD_CLEAR0 << e)
+        await chip.force(e, 3)  # jmp 3, in the engine's own page
+    await chip.enable(3)
+    await chip.cycles(40)
+    await chip.enable(0)
+    assert set(await chip.pop(0, 4)) == {5}
+    assert set(await chip.pop(1, 4)) == {17}
+
+
+@cocotb.test()
+async def test_page_jumps(dut):
+    """`set page` selects the page of the next jump taken: the instructions
+    after it and a jump not taken stay in the current page, the next taken
+    jump changes page, and a program spans both pages. A Host write to
+    EXECCFG sets the jump page too, and a restart keeps it."""
+    chip = await new_chip(dut)
+    home = await chip.load("""
+        set y, 3
+        in y, 16
+        push
+    done:
+        jmp done
+    """, 0)
+    span = await chip.load("""
+        set y, 1
+        set page, far
+        in y, 16           ; still page 0
+        push
+        jmp !y far         ; not taken: the page stays
+        jmp far            ; address 63, the last of page 0
+    far:
+        set y, 2
+        in y, 16
+        push
+        set page, 0
+        jmp 0
+    """, 58)
+    assert span.address("far", 58) == 64
+    rx = regs.fifo_mode(regs.FIFO_JOIN_RX)
+    await chip.setup_engine(0, span, 58, shiftctrl=rx)
+    await chip.enable(1)
+    await chip.cycles(40)
+    await chip.enable(0)
+    assert await chip.pop(0, 3) == [1, 2, 3]
+    assert (await chip.eread(0, regs.EXECCFG))[0] == 0
+    # A Host page write moves the forced jump to page 1 as well.
+    await chip.ereg(0, regs.EXECCFG, regs.EXECCFG_PAGE1)
+    await chip.force(0, 0)  # jmp 0: address 64
+    assert (await chip.eread(0, regs.EXECCFG))[0] == regs.EXECCFG_PAGE1
+    await chip.enable(1)
+    await chip.cycles(40)
+    await chip.enable(0)
+    assert await chip.pop(0, 2) == [2, 3]
+    # A forced `set page` holds across a restart until the next jump.
+    await chip.force_asm(0, "set page, 1")
+    await chip.write(regs.CMD, regs.CMD_RESTART0)
+    assert (await chip.eread(0, regs.EXECCFG))[0] == 0
+    await chip.force(0, 0)
+    await chip.enable(1)
+    await chip.cycles(40)
+    await chip.enable(0)
+    assert await chip.pop(0, 2) == [2, 3]
+    assert home.label("done") == 3

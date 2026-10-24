@@ -119,3 +119,17 @@ Remaining electrical violations include 228 maximum fanout violations, up to 221
 The same source's [global-route timing estimate, run 38056908556](https://github.com/JediNakDev/protocal-emulator-asic/actions/runs/38056908556), reported +2.62 ns slow-corner setup slack and 435,792 µm² of standard cell area.
 Detailed routing changed that slow-corner result to -4.14 ns, a 6.76 ns loss of margin.
 Use the final routed reports when assessing operating limits.
+
+## 2026-10-15: 128-word instruction memory in two pages
+
+Source: branch `design-review-baseline`, after the 128-word paged instruction memory and G2 emission into either engine.
+Tool: yosys 0.69, `synth -flatten -top tt_um_jedinakdev_protocol_emulator`, mapped with ABC to the IHP `sg13g2` typical liberty (1.2 V, 25 C); cell area before placement.
+
+| Store | Flip-flop storage | Latch storage (`PE_LATCH_STORE`) |
+| --- | --- | --- |
+| 64 words (before) | 332,569 µm² | 280,354 µm² |
+| 128 words (this change) | 429,914 µm² | 341,332 µm² |
+
+Doubling the store adds 97,345 µm² (+29%) to the flip-flop build.
+Scaling the routed `17995b3` result (436,690 µm² at 48.39%) by the same growth projects roughly 62% utilization on 6x4.
+This is an estimate; the next routed prerelease must confirm utilization, congestion and slow-corner setup slack.

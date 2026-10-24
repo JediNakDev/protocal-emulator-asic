@@ -7,7 +7,8 @@ Its instruction set and hardware primitives provide general pin and timing opera
 ## Goals
 
 - Make protocol behavior programmable without RTL changes or a new chip build.
-- Establish UART, SPI, and I2C as reliable base examples, then demonstrate additional protocols within documented limits.
+- Support as many protocols as possible, including future protocols uploaded after fabrication.
+- Meet the non-negotiable native protocol baseline defined in [AGENTS.md](AGENTS.md#non-negotiable-protocol-baseline); all competition examples are mandatory project capabilities.
 - Demonstrate a distinctive capability with reproducible evidence: cycle-exact waveform capture, Host editing, and replay for fault injection.
 - Keep the design routable and verify the area and timing cost of architectural changes.
 
@@ -16,12 +17,15 @@ Its instruction set and hardware primitives provide general pin and timing opera
 | Constraint | Current configuration |
 | --- | --- |
 | Process and flow | IHP 130nm CMOS5L through Tiny Tapeout |
-| Allocation | 6x4 tiles in `info.yaml` |
+| Allocation | 6x4 tiles in `info.yaml`; planned competition maximum is 8x4 once its template is available |
 | Interface | Standard Tiny Tapeout pins with an SPI-style Host port |
-| Clock target | 50 MHz; all-corner setup closure remains open |
-| Submission deadline | January 18, 2027, per the competition announcement |
+| Clock target | Project target of 50 MHz; competition has no fixed target and all-corner setup closure remains open |
+| Submission deadline | January 18, 2027, confirmed by the organizer email |
 
-Recheck the announcement before submission for changes to the allocation, deadline, and submission process.
+[The organizer update and FAQ](docs/competition-update.md), recorded October 13, 2026, covers allocation, SRAM, I/O, reset and reload, judging, and submission requirements.
+Keep designing to 6x4 until the 8x4 template is confirmed available.
+Flexibility is the main judging criterion, and the submission write-up must describe AI use.
+Recheck the current organizer rules and submission form before submission.
 RP2040 PIO and TI PRU are architectural inspiration.
 
 ## Implemented design and evidence
