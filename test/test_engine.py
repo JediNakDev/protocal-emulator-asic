@@ -494,11 +494,17 @@ async def test_count_sources(dut):
     assert await chip.dbg(0, 1) == 0
 
 
+async def fetch_page(chip, e):
+    """The page engine `e` fetches from (DBG_SEL 5, bits 15:13)."""
+    return (await chip.dbg(e, 5)) >> 13
+
+
 @cocotb.test()
 async def test_instruction_pages(dut):
-    """Each engine fetches from the page in EXECCFG bit 7: the same page
-    addresses run different programs, jumps and wrap stay in the page, and a
-    Host write while running reaches the page it addresses."""
+    """Each engine fetches from its own page: the same page addresses in
+    pages 1 and 5 run different programs, jumps and wrap stay in the page,
+    DBG reports the page, and a Host write while running reaches the page it
+    addresses, up to the last page, 7."""
     chip = await new_chip(dut)
     src = """
         set x, {v}
@@ -507,17 +513,21 @@ async def test_instruction_pages(dut):
         push
         jmp loop
     """
-    for e, (offset, v) in enumerate(((3, 5), (64 + 3, 9))):
+    for e, (offset, v) in enumerate(((64 + 3, 5), (320 + 3, 9))):
         prog = await chip.load(src.format(v=v), offset)
         await chip.setup_engine(e, prog, offset, shiftctrl=regs.fifo_mode(regs.FIFO_JOIN_RX))
-    assert (await chip.eread(1, regs.EXECCFG))[0] == regs.EXECCFG_PAGE1
+    assert await fetch_page(chip, 0) == 1
+    assert await fetch_page(chip, 1) == 5
+    assert await chip.read(regs.IMEM_ADDR, 1) == [(320 + 7) & 0xFF], "the write address counts on"
+    assert await chip.read(regs.IMEM_ADDR_H, 1) == [1]
     await chip.enable(3)
     await chip.cycles(40)
     await chip.enable(0)
     assert set(await chip.pop(0, 4)) == {5}
     assert set(await chip.pop(1, 4)) == {9}
-    # Replace `set x` in page 1 only, then rerun both from their starts.
-    await chip.write(regs.IMEM_ADDR, 64 + 3)
+    # Replace `set x` in page 5 only, then rerun both from their starts.
+    await chip.write(regs.IMEM_ADDR_H, 1)
+    await chip.write(regs.IMEM_ADDR, (320 + 3) & 0xFF)
     await chip.write16(regs.IMEM_DATA, [assemble("set x, 17").code[0]])
     for e in range(2):
         await chip.write(regs.CMD, regs.CMD_CLEAR0 << e)
@@ -527,14 +537,71 @@ async def test_instruction_pages(dut):
     await chip.enable(0)
     assert set(await chip.pop(0, 4)) == {5}
     assert set(await chip.pop(1, 4)) == {17}
+    # Page 7, the last page, runs a program too, and a Host write there
+    # while the engine runs reaches it.
+    top = await chip.load(src.format(v=21), 448 + 3)
+    assert top.address("loop", 448 + 3) == 452
+    await chip.write(regs.CMD, regs.CMD_CLEAR1)
+    await chip.force_asm(1, "set page, 7")
+    await chip.force(1, 3)
+    await chip.enable(2)
+    await chip.cycles(40)
+    assert await fetch_page(chip, 1) == 7
+    await chip.write(regs.IMEM_ADDR_H, 1)
+    await chip.write(regs.IMEM_ADDR, (448 + 3) & 0xFF)
+    await chip.write16(regs.IMEM_DATA, [assemble("set x, 23").code[0]])
+    await chip.enable(0)
+    assert set(await chip.pop(1, 4)) == {21}
+    await chip.write(regs.CMD, regs.CMD_CLEAR1)
+    await chip.force(1, 3)
+    await chip.enable(2)
+    await chip.cycles(40)
+    await chip.enable(0)
+    assert set(await chip.pop(1, 4)) == {23}
+    # The write address wraps from 511 to 0.
+    await chip.write(regs.IMEM_ADDR, 255)
+    await chip.write16(regs.IMEM_DATA, [0, 0])
+    assert await chip.read(regs.IMEM_ADDR, 1) == [1]
+    assert await chip.read(regs.IMEM_ADDR_H, 1) == [0]
+
+
+@cocotb.test()
+async def test_every_instruction_word(dut):
+    """Every bit of all 512 instruction words stores both values: fill the
+    memory with a pattern that differs in every row, read each word back
+    through DBG (the instruction at a forced `jmp` target), then repeat with
+    the complement. A row whose write enable is broken keeps the old word or
+    reads X; build 7's clock tree disconnected the enables of rows 193, 295
+    and 397 (area log, 2026-10-26)."""
+    chip = await new_chip(dut)
+    base = [(a * 0x9E37 ^ a << 7 ^ 0x5A5A) & 0xFFFF for a in range(512)]
+    for pattern in (base, [w ^ 0xFFFF for w in base]):
+        await chip.write(regs.IMEM_ADDR_H, 0)
+        await chip.write(regs.IMEM_ADDR, 0)
+        await chip.write16(regs.IMEM_DATA, pattern)
+        await chip.write(regs.DBG_SEL, 6)
+        bad = []
+        for page in range(8):
+            await chip.force_asm(0, f"set page, {page}")
+            for a in range(64):
+                await chip.force(0, a)  # jmp a
+                want = pattern[64 * page + a]
+                try:
+                    got = hex((await chip.read16(regs.engine_reg(0, regs.DBG)))[0])
+                except ValueError:  # X or Z on HDO: the word is unknown
+                    got = "X"
+                if got != hex(want):
+                    bad.append((64 * page + a, got, hex(want)))
+        assert not bad, f"words that did not store: {bad[:8]} ({len(bad)} total)"
 
 
 @cocotb.test()
 async def test_page_jumps(dut):
     """`set page` selects the page of the next jump taken: the instructions
     after it and a jump not taken stay in the current page, the next taken
-    jump changes page, and a program spans both pages. A Host write to
-    EXECCFG sets the jump page too, and a restart keeps it."""
+    jump changes page, and a program spans pages 2 and 3. A Host write to
+    EXECCFG leaves the pages alone; a forced `set page` and `jmp` move the
+    engine, and a restart keeps the jump page."""
     chip = await new_chip(dut)
     home = await chip.load("""
         set y, 3
@@ -546,38 +613,41 @@ async def test_page_jumps(dut):
     span = await chip.load("""
         set y, 1
         set page, far
-        in y, 16           ; still page 0
+        in y, 16           ; still page 2
         push
         jmp !y far         ; not taken: the page stays
-        jmp far            ; address 63, the last of page 0
+        jmp far            ; address 191, the last of page 2
     far:
         set y, 2
         in y, 16
         push
         set page, 0
         jmp 0
-    """, 58)
-    assert span.address("far", 58) == 64
+    """, 128 + 58)
+    assert span.address("far", 128 + 58) == 192
     rx = regs.fifo_mode(regs.FIFO_JOIN_RX)
-    await chip.setup_engine(0, span, 58, shiftctrl=rx)
+    await chip.setup_engine(0, span, 128 + 58, shiftctrl=rx)
     await chip.enable(1)
     await chip.cycles(40)
     await chip.enable(0)
     assert await chip.pop(0, 3) == [1, 2, 3]
+    assert await fetch_page(chip, 0) == 0
+    # EXECCFG bit 7 is reserved: it reads 0 and the next jump stays in page 0.
+    await chip.ereg(0, regs.EXECCFG, 0x80)
     assert (await chip.eread(0, regs.EXECCFG))[0] == 0
-    # A Host page write moves the forced jump to page 1 as well.
-    await chip.ereg(0, regs.EXECCFG, regs.EXECCFG_PAGE1)
-    await chip.force(0, 0)  # jmp 0: address 64
-    assert (await chip.eread(0, regs.EXECCFG))[0] == regs.EXECCFG_PAGE1
+    await chip.force(0, 0)  # jmp 0: address 0
     await chip.enable(1)
     await chip.cycles(40)
     await chip.enable(0)
-    assert await chip.pop(0, 2) == [2, 3]
+    assert await chip.pop(0, 1) == [3]
+    assert (await chip.levels(0))[1] == 0
     # A forced `set page` holds across a restart until the next jump.
-    await chip.force_asm(0, "set page, 1")
+    await chip.write(regs.CMD, regs.CMD_CLEAR0)
+    await chip.force_asm(0, "set page, 3")
     await chip.write(regs.CMD, regs.CMD_RESTART0)
-    assert (await chip.eread(0, regs.EXECCFG))[0] == 0
-    await chip.force(0, 0)
+    assert await fetch_page(chip, 0) == 0
+    await chip.force(0, 0)  # jmp 0: address 192
+    assert await fetch_page(chip, 0) == 3
     await chip.enable(1)
     await chip.cycles(40)
     await chip.enable(0)

@@ -17,17 +17,22 @@ Additions beyond PIO: `wait <pol> <gpio|pin|flag> <n> timeout` counts its
 checks down in X and leaves X at 0 only if it timed out, and
 `mov <dest>, isrcnt` / `mov <dest>, osrcnt` read the shift counts.
 
-A program may span both pages of instruction memory. `set page, label` selects
-the page of a label for the next jump taken, so `set page, far` followed by
-`jmp far` crosses pages. The assembler checks that every jump to a label in
-the other page directly follows such a `set page`, and that straight-line code
+A program may span the eight pages of instruction memory. `set page, label`
+selects the page of a label for the next jump taken, so `set page, far`
+followed by `jmp far` crosses pages. The assembler checks that every jump to a
+label in another page follows such a `set page`, and that straight-line code
 does not run across a page boundary (execution wraps within its page). The
 wrap bounds are page addresses, so the wrap happens at the `.wrap` address in
-either page; the assembler rejects a program that would reach that address in
-the other page without a jump.
+every page; the assembler rejects a program that would reach that address in
+another page without a jump.
 
 Comments start with ';' or '//'. Numbers may be decimal, 0x or 0b.
 `.define NAME value` creates a constant.
+`set x, label` loads the label's page address, which must be 0-31, and
+`set x, ~label` loads 63 minus it, for `mov dest, ~x`: either way a program
+can hold a return address for `mov pc`.
+`.org offset` places the next instruction at a program-relative word offset,
+padding unused words with `jmp 0`; it cannot move backwards.
 """
 
 import re
@@ -52,7 +57,8 @@ WAIT_INDEX_LIMIT = {"gpio": 16, "pin": 16, "flag": 8}
 SET_DEST = {"pins": 0, "x": 1, "y": 2, "page": 3, "pindirs": 4}
 
 PAGE_SIZE = 64   # an engine fetches from one page; `set page` selects the next
-MEM_SIZE = 128
+PAGES = 8
+MEM_SIZE = PAGES * PAGE_SIZE
 
 
 class AsmError(Exception):
@@ -73,19 +79,27 @@ class Program:
     origin: int = None
     defines: dict = field(default_factory=dict)
     pages: list = field(default_factory=list)   # (index, label) of `set page, label`
+    sets: list = field(default_factory=list)    # (index, label, inverted) of `set x, label`
 
     def __len__(self):
         return len(self.code)
 
     def words(self, offset):
-        """Machine words relocated to load at memory address `offset` (0-127).
+        """Machine words relocated to load at memory address `offset` (0-511).
         Jump targets are page addresses; `set page, label` gets the label's page."""
         if not 0 <= offset or offset + len(self.code) > MEM_SIZE:
             raise AsmError(f"{self.name}: does not fit in memory at offset {offset}")
         out = list(self.code)
         for i, lbl in self.pages:
-            out[i] = (out[i] & ~1) | (self.labels[lbl] + offset) // PAGE_SIZE
+            out[i] = (out[i] & ~7) | (self.labels[lbl] + offset) // PAGE_SIZE
         self._check_pages(out, offset)
+        for i, lbl, inv in self.sets:
+            addr = (self.labels[lbl] + offset) % PAGE_SIZE
+            v = PAGE_SIZE - 1 - addr if inv else addr
+            if v > 31:
+                raise AsmError(f"{self.name}: `set` of {'~' if inv else ''}{lbl} needs {v},"
+                               " beyond 31; use the other form")
+            out[i] = (out[i] & ~0x1F) | v
         for i, lbl in self.jumps:
             out[i] = (out[i] & ~0x3F) | ((self.labels[lbl] + offset) & 0x3F)
         return out
@@ -110,7 +124,7 @@ class Program:
                 work.append(i)
             i = work.pop()
             w = words[i]
-            jp = {w & 1} if _is_set_page(w) else state[i]
+            jp = {w & 7} if _is_set_page(w) else state[i]
             if _ends_flow(w):
                 continue
             if i != self.wrap and (i + offset) % PAGE_SIZE == top:
@@ -136,7 +150,7 @@ class Program:
         return (self.labels[name] + offset) % PAGE_SIZE
 
     def address(self, name, offset=0):
-        """Memory address (0-127) of a label for a program loaded at `offset`."""
+        """Memory address (0-511) of a label for a program loaded at `offset`."""
         return self.labels[name] + offset
 
     def page_address(self, index, offset=0):
@@ -200,6 +214,11 @@ def assemble(text):
                 wrap = len(lines) - 1
             elif d == ".origin":
                 origin = _num(parts[1], defines)
+            elif d == ".org":
+                target = _num(parts[1], defines)
+                if not len(lines) <= target < MEM_SIZE:
+                    raise AsmError(f"line {lineno}: .org must advance within instruction memory")
+                lines.extend((lineno, "jmp 0") for _ in range(target - len(lines)))
             else:
                 raise AsmError(f"line {lineno}: unknown directive {d}")
             continue
@@ -220,12 +239,15 @@ def assemble(text):
     code = []
     jumps = []
     pages = []
+    sets = []
     for lineno, line in lines:
         try:
             word, reloc = _encode(line, labels, defines, side_count, side_opt)
         except AsmError as e:
             raise AsmError(f"line {lineno}: {e}") from None
-        if reloc:
+        if reloc and reloc[0] == "set":
+            sets.append((len(code), reloc[1], reloc[2]))
+        elif reloc:
             (jumps if reloc[0] == "jmp" else pages).append((len(code), reloc[1]))
         code.append(word)
 
@@ -233,7 +255,7 @@ def assemble(text):
         raise AsmError(f"{name}: {len(code)} instructions exceed the memory of {MEM_SIZE}")
 
     return Program(name, code, jumps, labels, wrap_target, wrap, side_count, side_opt,
-                   side_pindirs, origin, defines, pages)
+                   side_pindirs, origin, defines, pages, sets)
 
 
 def _is_set_page(word):
@@ -358,9 +380,11 @@ def _encode(line, labels, defines, side_count, side_opt):
         dst = a[0].lower()
         if dst == "page" and a[1] in labels:
             v, reloc = 0, ("page", a[1])
+        elif dst in ("x", "y") and a[1].lstrip("~") in labels:
+            v, reloc = 0, ("set", a[1].lstrip("~"), a[1].startswith("~"))
         else:
             v = _num(a[1], defines)
-        if dst not in SET_DEST or not 0 <= v <= 31 or (dst == "page" and v > 1):
+        if dst not in SET_DEST or not 0 <= v <= 31 or (dst == "page" and v >= PAGES):
             raise AsmError(f"bad set: {line}")
         base = (OP_SET << 13) | (SET_DEST[dst] << 5) | v
     else:

@@ -3,9 +3,29 @@
 
 import zlib
 
+from .. import regs
 from . import records
 
 PREAMBLE_SFD = bytes([0x55] * 7 + [0xD5])
+
+# Clock recovery (G7) for eth10_rx at 50 MHz with two samples per cycle, so
+# 10 samples per 100 ns bit. Edges count within +/- 0.44 bit of the mid-bit
+# transition and the one nearest the expected phase corrects it; the strobe
+# takes the sample 0.44 bit after the transition, the gain settles at 2^-6,
+# and lock is lost at the third bit without a mid-bit transition: the end of
+# the frame. Measured margin: docs/protocols.md.
+RX_INC = 6554  # 65536 / 10, rounded: +31 ppm
+RX_WIN = 112
+RX_SAMPLE = 112
+RX_SHIFT = 6
+RX_LOSS = 2
+
+
+def rx_clock_recovery(pin):
+    """CR_CTRL to CR_SAMPLE (0x30-0x35) for eth10_rx receiving on `pin`;
+    NEGSEL must select the same pin."""
+    return [regs.CR_ENABLE | regs.CR_DOUBLE | regs.CR_LOCK_RISING | regs.cr_pin(pin),
+            regs.cr_gain(RX_SHIFT, RX_LOSS), RX_INC & 0xFF, RX_INC >> 8, RX_WIN, RX_SAMPLE]
 
 
 def frame(dst, src, ethertype, payload):
@@ -17,9 +37,10 @@ def frame(dst, src, ethertype, payload):
 
 
 def tx_words(wire_bytes):
-    bits = len(wire_bytes) * 8
+    """eth10_tx transmit words: the number of bit pairs - 1, then the bits."""
+    pairs = len(wire_bytes) * 4
     data = wire_bytes + bytes(len(wire_bytes) % 2)
-    return [bits - 1] + [data[i] | data[i + 1] << 8 for i in range(0, len(data), 2)]
+    return [pairs - 1] + [data[i] | data[i + 1] << 8 for i in range(0, len(data), 2)]
 
 
 def split_records(words):

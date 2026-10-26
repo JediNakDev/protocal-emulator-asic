@@ -20,6 +20,10 @@ module pe_g2 (
     input  wire [1:0]  tick,      // engine divider ticks
     input  wire [1:0]  feed_wr,   // engine `out g2` writes
     input  wire [1:0]  feed_din,
+    // Clock recovery (G7)
+    input  wire        cr_strobe,
+    input  wire        cr_data,
+    input  wire        cr_locked,
     // Outputs
     output reg         owner,
     output reg         feed_full,
@@ -56,21 +60,23 @@ module pe_g2 (
       .q    (tbl)
   );
 
+  // Sources: 0-15 the pin space, 16 feed bit, 17 feed full, 18 recovered
+  // data, 19 recovery locked, 20 recovery strobe, others 0.
+  wire [4:0] src_ext = {cr_strobe, cr_locked, cr_data, feed_full, feed_bit};
+
   function sel_bit;
     input [4:0]  sel;
     input [15:0] pins;
-    input        fbit;
-    input        ffull;
+    input [4:0]  ext;
     begin
       if (!sel[4]) sel_bit = pins[sel[3:0]];
-      else if (sel == 5'd16) sel_bit = fbit;
-      else if (sel == 5'd17) sel_bit = ffull;
+      else if (sel[3:0] < 4'd5) sel_bit = ext[sel[2:0]];
       else sel_bit = 1'b0;
     end
   endfunction
 
-  wire in0 = sel_bit(in0_sel, pins_in, feed_bit, feed_full);
-  wire in1 = sel_bit(in1_sel, pins_in, feed_bit, feed_full);
+  wire in0 = sel_bit(in0_sel, pins_in, src_ext);
+  wire in1 = sel_bit(in1_sel, pins_in, src_ext);
 
   wire [7:0] entry = tbl[{state, in1, in0}*8 +: 8];
 
@@ -81,7 +87,7 @@ module pe_g2 (
       2'd0: step = en;
       2'd1: step = en & owner_tick;
       2'd2: step = en & feed_full;
-      default: step = 1'b0;
+      default: step = en & cr_strobe;
     endcase
   end
 

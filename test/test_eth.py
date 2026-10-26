@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """10BASE-T transmit and receive programs against independent Manchester
-peers in absolute time, at the 40 MHz clock profile."""
+peers in absolute time, at the 50 MHz clock profile."""
 
 import os
 import random
@@ -10,13 +10,13 @@ import cocotb
 from cocotb.triggers import Timer
 from cocotb.utils import get_sim_time
 
-from chip import MHZ_40, Chip, fails_at_wrong_clock, regs
+from chip import MHZ_50, Chip, fails_at_wrong_clock, regs
 from pe import g2 as g2lib
 from pe.proto import eth
 from peers import Wave, now_ns, sleep_ns
 
-PROFILE = MHZ_40
-TDP, TDM, RX = 2, 3, 8
+PROFILE = MHZ_50
+TDP, TDM, PHASE, RX = 2, 3, 4, 8
 BIT_NS = 100.0
 TX_TOLERANCE_NS = 2.0  # transmitted transitions from the 100 ns grid
 TP_IDL_NS = (250, 350)  # TD+ high after the last bit cell, 802.3 14.3.1.2.1
@@ -104,8 +104,12 @@ async def tx_setup(chip):
     await chip.setup_engine(0, prog, shiftctrl=regs.AUTOPULL | regs.OUT_RIGHT
                             | regs.fifo_mode(regs.FIFO_JOIN_TX), side_base=TDP,
                             execcfg=prog.label("table"), statuscfg=1)
-    await chip.ereg(0, regs.SETPIN, TDP | (2 << 4))
-    await chip.force_asm(0, "set pindirs, 3 side 0", side_count=2)
+    # Mid-bit transitions: S (PHASE, never driven) flips TD+ and TD- half a
+    # cycle after the program writes it.
+    mask = 1 << TDP | 1 << TDM
+    await chip.write(regs.NEGOUT, [PHASE, mask & 0xFF, mask >> 8])
+    await chip.ereg(0, regs.SETPIN, TDP | (3 << 4))
+    await chip.force_asm(0, "set pindirs, 3 side 0", side_count=3)
     await chip.pincfg(TDP, regs.DRIVE_PUSH_PULL)
     await chip.pincfg(TDM, regs.DRIVE_PUSH_PULL)
 
@@ -133,16 +137,19 @@ async def test_eth_transmit(dut):
 
 @cocotb.test()
 async def test_eth_wrong_clock(dut):
-    """At 50 MHz the 40 MHz transmit program sends 12.5 Mbit/s, which the
+    """At 40 MHz the 50 MHz transmit program sends 8 Mbit/s, which the
     monitor rejects."""
     msg = await fails_at_wrong_clock(lambda hz: transmit_session(dut, hz), PROFILE)
     assert "timing: Manchester" in msg, msg
 
 
-async def drive_rx(chip, wire, jitter_ns, start_ns, seed):
-    """Drive the RX pin with Manchester at 100 ns per bit, each transition
-    displaced by up to +/- jitter_ns, then TP_IDL and idle."""
+async def drive_rx(chip, wire, jitter_ns, start_ns, seed, isi_ns=0.0, ppm=0.0, extreme=False):
+    """Drive the RX pin with Manchester at 100 ns per bit (scaled by `ppm`),
+    then TP_IDL and idle. Each transition is displaced by up to +/- jitter_ns
+    at random, and by isi_ns of pattern-dependent jitter: late after a
+    100 ns pulse, early after a 50 ns one, as a band-limited cable does."""
     rng = random.Random(seed)
+    half_ns = 50.0 * (1 + ppm * 1e-6)
     halves = []
     for byte in wire:
         for j in range(8):
@@ -151,16 +158,20 @@ async def drive_rx(chip, wire, jitter_ns, start_ns, seed):
     await Timer(start_ns, unit="ns")
     t = 0.0
     last = 0.0  # time of the last transition
+    nominal = None  # its time without jitter
     level = 0
     chip.set_pin8(0)
     for i, h in enumerate(halves):
         if h != level:
-            d = rng.uniform(-jitter_ns, jitter_ns) if jitter_ns else 0.0
+            d = (rng.choice((-jitter_ns, jitter_ns)) if extreme else
+                 rng.uniform(-jitter_ns, jitter_ns)) if jitter_ns else 0.0
+            if isi_ns and nominal is not None:
+                d += isi_ns if t - nominal > 1.5 * half_ns else -isi_ns
             await Timer(round((t + d) * 1000) - round(last * 1000), unit="ps")
-            last = t + d
+            last, nominal = t + d, t
             chip.set_pin8(h)
             level = h
-        t += 50.0
+        t += half_ns
     # TP_IDL: high from the end of the last bit cell for at least 250 ns.
     await Timer(round((t - last) * 1000), unit="ps")
     chip.set_pin8(1)
@@ -181,10 +192,11 @@ async def rx_setup(chip):
     await chip.setup_engine(1, prog, shiftctrl=regs.AUTOPUSH | regs.fifo_mode(regs.FIFO_JOIN_RX), thresh=15)
     await chip.write(regs.NEGSEL, RX)
     await chip.write(regs.G2_ADDR, 0)
-    await chip.write(regs.G2_DATA, g2lib.manchester_receiver())
-    await chip.write(regs.G2_IN0, [RX, regs.PIN_NEG])
-    await chip.write(regs.G2_STATE, 8)  # idle, line low
-    await chip.write(regs.G2_CTRL, regs.G2_ENABLE | regs.G2_OWNER1 | regs.G2_STEP_CYCLE | regs.G2_EMIT)
+    await chip.write(regs.G2_DATA, g2lib.recovered_bits())
+    await chip.write(regs.G2_IN0, [regs.G2_SRC_CR_DATA, regs.G2_SRC_CR_LOCKED])
+    await chip.write(regs.G2_STATE, 0x20)  # out1: not locked
+    await chip.write(regs.G2_CTRL, regs.G2_ENABLE | regs.G2_OWNER1 | regs.G2_STEP_STROBE | regs.G2_EMIT)
+    await chip.write(regs.CR_CTRL, eth.rx_clock_recovery(RX))
     await chip.enable(2)
 
 
@@ -211,7 +223,7 @@ async def collect_records(chip, n, pauses=None, timeout=400000):
 
 def check_frame(record, wire):
     res = eth.parse(record)
-    assert res is not None, record
+    assert res is not None, f"unparsable record {record[:8]}, {len(record)} words"
     body, ok = res
     assert body == wire[8:-4], (body.hex(), wire[8:-4].hex())
     assert ok, "FCS"
@@ -221,13 +233,14 @@ async def no_overflow(chip):
     assert not (await chip.read8(regs.STICKY)) & regs.STK_RX_OVF1, "receive overflow"
 
 
-async def receive(dut, payload, jitter_ns, start_ns, seed=1, hz=PROFILE):
+async def receive(dut, payload, jitter_ns, start_ns, seed=1, hz=PROFILE, isi_ns=0.0, ppm=0.0, extreme=False):
     chip = await new_chip(dut, hz)
     chip.set_pin8(0)
     await rx_setup(chip)
     wire = wire_frame(payload)
-    cocotb.start_soon(drive_rx(chip, wire, jitter_ns, start_ns, seed))
-    records, words = await collect_records(chip, 1, timeout=20_000)
+    cocotb.start_soon(drive_rx(chip, wire, jitter_ns, start_ns, seed, isi_ns, ppm, extreme))
+    # A bit takes 5 cycles at 50 MHz: allow the whole frame plus margin.
+    records, words = await collect_records(chip, 1, timeout=20_000 + 50 * len(wire))
     assert len(records) == 1, f"frame split into {len(records)} records"
     check_frame(records[0], wire)
     await no_overflow(chip)
@@ -238,28 +251,80 @@ async def test_eth_receive(dut):
     await receive(dut, bytes(range(46)) + b"hello", jitter_ns=0, start_ns=1000)
 
 
+# IEEE 802.3 clause 14: the receiver must accept transitions displaced by
+# up to +/- 13.5 ns. Clock recovery samples on both edges at 50 MHz (a 10 ns
+# grid) and corrects its phase from the transition nearest where it expects
+# one, so what limits it is the sampling: a 50 ns half bit, minus both
+# edges' jitter, minus the 10 ns between samples. tools/eth_margin.py
+# measures it on the model of G7 at every phase and 0 and +/- 200 ppm: no
+# frame lost up to +/- 14 ns with every transition at an extreme of the
+# range (docs/protocols.md#ethernet-receive-margin).
+JITTER_NS = 13.5
+
+
 @cocotb.test()
 async def test_eth_receive_jitter(dut):
-    """Each transition displaced by up to +/- 8 ns. The decoder's margin is
-    12.5 ns between two consecutive transitions; in simulation it passes at
-    +/- 9 ns per transition and fails at +/- 10 ns."""
-    await receive(dut, bytes(reversed(range(60))), jitter_ns=8, start_ns=1003, seed=7)
+    """Each transition displaced at random by up to +/- 13.5 ns, at several
+    input phases and at the 802.3 frequency tolerance (+/- 100 ppm at each
+    end, so +/- 200 ppm between them)."""
+    cases = [(1003.0, 0), (1009.4, 200), (1016.9, -200), (1021.3, 200)]
+    for k, (start, ppm) in enumerate(cases):
+        await receive(dut, bytes(reversed(range(60))), jitter_ns=JITTER_NS, start_ns=start, seed=7 + k, ppm=ppm)
+
+
+@cocotb.test()
+async def test_eth_receive_extreme_jitter(dut):
+    """Every transition at one endpoint of the permitted jitter range, at
+    random. At 40 MHz with 12.5 ns between samples this pattern defeated the
+    receiver (B12): as the sampling grid slides past the transitions at
+    +/- 200 ppm the two jitter values quantize unevenly, which a receiver
+    that starts cold cannot tell from a phase error."""
+    for k, ppm in enumerate((-200, 0, 200)):
+        await receive(dut, bytes(reversed(range(60))), jitter_ns=JITTER_NS,
+                      start_ns=1003 + k * 7.1, seed=7 + k, ppm=ppm, extreme=True)
+    rng = random.Random(12)
+    for k, (start, ppm) in enumerate(((1001.3, 200), (1005.7, -200))):
+        payload = bytes(rng.getrandbits(8) for _ in range(166))
+        await receive(dut, payload, jitter_ns=JITTER_NS, start_ns=start, seed=30 + k,
+                      ppm=ppm, extreme=True)
+
+
+@cocotb.test()
+async def test_eth_receive_cable_jitter(dut):
+    """The 13.5 ns as a cable delivers it: 5.5 ns of pattern-dependent jitter
+    (a transition after a 100 ns pulse is late, after a 50 ns pulse early)
+    plus up to +/- 8 ns at random."""
+    rng = random.Random(11)
+    for k, start in enumerate((1002.0, 1013.7)):
+        payload = bytes(rng.getrandbits(8) for _ in range(60))
+        await receive(dut, payload, jitter_ns=JITTER_NS - 5.5, isi_ns=5.5, start_ns=start, seed=20 + k,
+                      ppm=(200, -200)[k])
+
+
+@cocotb.test(skip=GATES)
+async def test_eth_receive_long_frame(dut):
+    """A maximum-length frame (1518 bytes) at +200 ppm with +/- 13.5 ns of
+    jitter: the loop tracks the frequency offset over 12,000 bits."""
+    rng = random.Random(5)
+    payload = bytes(rng.getrandbits(8) for _ in range(1500))
+    await receive(dut, payload, jitter_ns=JITTER_NS, start_ns=1004.4, seed=5, ppm=200)
 
 
 @cocotb.test()
 async def test_eth_receive_wrong_clock(dut):
-    """At 50 MHz the 40 MHz receive table's windows are 20% short: a frame
-    with the +/- 8 ns jitter it tolerates at 40 MHz breaks up."""
+    """At 40 MHz the 50 MHz clock recovery settings expect 10 samples per bit
+    where there are 8: a 20% frequency error, far outside what the loop
+    tracks, so the frame that passes at 50 MHz breaks up."""
     msg = await fails_at_wrong_clock(
-        lambda hz: receive(dut, bytes(reversed(range(60))), jitter_ns=8, start_ns=1003, seed=7, hz=hz),
+        lambda hz: receive(dut, bytes(reversed(range(60))), jitter_ns=JITTER_NS, start_ns=1003, seed=7, hz=hz),
         PROFILE)
-    assert "records" in msg, msg
+    assert "unparsable record" in msg or "records" in msg, msg
 
 
 @cocotb.test()
 async def test_eth_receive_phases(dut):
     """The input phase relative to the clock must not matter."""
-    for k, start in enumerate((1001.0, 1006.25, 1012.5, 1018.75, 1023.0)):
+    for k, start in enumerate((1001.0, 1005.0, 1010.0, 1015.0, 1019.0)):
         await receive(dut, bytes([k] * 46), jitter_ns=0, start_ns=start, seed=k)
 
 

@@ -13,7 +13,7 @@
 ; Config: push threshold 15, no autopush, `in` shifting left, `out`
 ;   shifting right, buffer mode JOIN_RX; CLKDIV 0; 50 cycles per bit
 ;   (1 Mbit/s at 50 MHz). Y = N1, which the Host sets with a forced
-;   `set y, 8`; start at `idle`.
+;   `set y, 8`; start at `start`.
 ; Receive words: count-terminated records (tools/pe/proto/records.py) of the
 ;   raw (stuffed) bus bits, one record from a start of frame until the bus is
 ;   idle; the last word of a record may hold all 15 bits.
@@ -28,9 +28,17 @@
 ;   t = 14..32 (late: after the strobe at t = 11); one seen at t = 10..13
 ;   counts as seen at 14. An edge caused by this node's own dominant TXD
 ;   never resynchronizes. Without an edge the next sample is at t = 50.
+;   A late edge while flag 2 is set (the bus idle after intermission bit 2)
+;   is a start of frame in intermission bit 3: it hard-synchronizes, the
+;   record going on.
 .define RXD 8
 .define N1 8                   ; checks before the boundary strobe
 .define N2 19                  ; checks from t = 14 to t = 32
+start:                         ; entry: until can_node has integrated into
+    set x, 1                   ; the bus (flag 2), so that no record starts
+    wait 0 flag 2 timeout      ; inside a frame
+    jmp x-- start              ; X = 0 if flag 2 is set
+    jmp idle
 close:                         ; end of a record
     mov x, isrcnt
     push noblock
@@ -62,9 +70,16 @@ tail:                          ; t = 35
     jmp !x close
     set x, N1          [7]
     jmp bit            [1]     ; next sample at t = 50
-other:
+other:                         ; c + 2 for an edge seen at c
     jmp !x tail                ; no edge (t = 34)
-    jmp resync         [1]     ; an edge at c
+    set x, 1
+    wait 0 flag 2 timeout      ; X = 0 if the bus is idle: the edge starts a
+    jmp !x sof3                ; frame in intermission bit 3
+    set x, N1          [26]    ; c + 6: next sample at c + 36
+    jmp bit
+sof3:                          ; hard synchronization, as from idle: next
+    set x, N1          [23]    ; sample at c + 33
+    jmp bit
 early:                         ; c + 3: an edge before the boundary
     irq set 1                  ; the next bit begins
     jmp resync

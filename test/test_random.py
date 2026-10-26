@@ -18,11 +18,11 @@ import os
 import random
 
 import cocotb
-from cocotb.triggers import ReadOnly, RisingEdge
+from cocotb.triggers import FallingEdge, ReadOnly, RisingEdge
 
 from chip import Chip
 from pe import regs
-from pe.model import Chip as Model
+from pe.model import MEM_SIZE, Chip as Model
 
 GATES = os.environ.get("GATES") == "yes"
 SEEDS = int(os.environ.get("PE_RANDOM_SEEDS", 4 if GATES else 60))
@@ -30,11 +30,17 @@ FIRST_SEED = int(os.environ.get("PE_RANDOM_SEED", 1))
 
 RUN = 400        # cycles the engines run
 TAIL = 80        # cycles after disabling, with the board inputs held
-G2_ON, EN_ON = 10, 60  # sampler cycles at which those Host writes start
+G2_ON, CR_ON, EN_ON = 10, 60, 110  # sampler cycles at which those Host writes start
 EN_OFF = EN_ON + RUN
-IMEM_AT = [EN_ON + 100, EN_ON + 200, EN_ON + 300]  # instruction memory writes while running
+# Instruction memory writes while running. Each is preceded by a write of
+# address bit 8 (IMEM_ADDR_H) starting IMEM_H_LEAD cycles earlier. At 16
+# cycles per byte, the 2-byte bit 8 write ends before its word write starts,
+# and the 4-byte word write ends before the next bit 8 write starts.
+IMEM_AT = [EN_ON + 90, EN_ON + 210, EN_ON + 330]
+IMEM_H_LEAD = 45
 G2_OFF = EN_OFF + 50
-CYCLES = G2_OFF + 50 + TAIL
+CR_OFF = G2_OFF + 50
+CYCLES = CR_OFF + 50 + TAIL
 
 
 # ------------------------------------------------------------- random setup
@@ -65,10 +71,12 @@ def random_instr(rng, toggling):
 def random_setup(rng):
     s = {}
     s["g2_table"] = [rng.getrandbits(8) for _ in range(64)]
-    s["g2_in"] = [rng.randrange(18) if rng.random() < 0.9 else rng.getrandbits(5) for _ in range(2)]
+    s["g2_in"] = [rng.randrange(21) if rng.random() < 0.9 else rng.getrandbits(5) for _ in range(2)]
     s["g2_state"] = rng.getrandbits(6)
     s["g2_ctrl"] = rng.getrandbits(6) if rng.random() < 0.7 else 0
     s["negsel"] = rng.getrandbits(4)
+    s["negout"] = rng.getrandbits(4)
+    s["negmask"] = rng.getrandbits(13) if rng.random() < 0.5 else 0
     s["pincfg"] = []
     for i in range(13):
         owner = rng.choices(range(4), [4, 4, 1, 1])[0]
@@ -76,9 +84,9 @@ def random_setup(rng):
         flt = rng.getrandbits(2) if rng.random() < 0.3 else 0  # mostly unfiltered
         s["pincfg"].append(owner | (drive << 2) | (rng.getrandbits(2) << 4) | (flt << 6))
     toggling = [i for i in range(8) if (s["pincfg"][i] >> 2) & 3 in (0, 2)] + [8, 9]
-    s["imem"] = [random_instr(rng, toggling) for _ in range(128)]
+    s["imem"] = [random_instr(rng, toggling) for _ in range(MEM_SIZE)]
     # Load a short count before most timed waits, so they also time out.
-    for i in range(1, 128):
+    for i in range(1, MEM_SIZE):
         w = s["imem"][i]
         if w >> 13 == 2 and w & 0x10 and rng.random() < 0.7:
             s["imem"][i - 1] = 0xE000 | (1 << 5) | rng.randrange(32)  # set x, n
@@ -86,6 +94,11 @@ def random_setup(rng):
     # the address, offset from that PC or None for a random address, word).
     s["imem_writes"] = [(rng.getrandbits(1), rng.choice([0, 0, 1, 1, 2, None]), random_instr(rng, toggling))
                         for _ in IMEM_AT if rng.random() < 0.5]
+    # Clock recovery (G7) on a toggling pin, at 4 to 64 samples per bit.
+    cr_pin = rng.choice(toggling) if toggling and rng.random() < 0.9 else rng.getrandbits(4)
+    inc = rng.randrange(1024, 16385)
+    s["cr"] = [(rng.random() < 0.7) | rng.getrandbits(3) << 1 | cr_pin << 4, rng.getrandbits(8),
+               inc & 0xFF, inc >> 8, rng.choice([rng.getrandbits(8), rng.randrange(16, 129)]), rng.getrandbits(8)]
     s["pull_up"] = rng.getrandbits(8)
     s["flags"] = rng.getrandbits(8) if rng.random() < 0.3 else 0
     s["engines"] = []
@@ -102,7 +115,7 @@ def random_setup(rng):
         e = {
             # Small X values let timed waits run out within the run.
             "x": rng.getrandbits(16) if rng.random() < 0.3 else rng.randrange(48),
-            "y": rng.getrandbits(16), "start": rng.randrange(64),
+            "y": rng.getrandbits(16), "start": rng.randrange(64), "page": rng.getrandbits(3),
             "regs": [rng.choice([0, 0, 0, 1, 2, 3]), 0, rng.randrange(64), rng.randrange(64)]
                     + [shiftctrl(rng), rng.getrandbits(8), outpin, setpin,
                        rng.getrandbits(8), sidepin, rng.getrandbits(8), rng.getrandbits(5),
@@ -125,13 +138,15 @@ def shiftctrl(rng):
 def calibration_setup():
     """Engine 0: `set pins, 1` on pin 10, then `in count, 16` and `push`."""
     s = random_setup(random.Random(0))
-    s["imem"] = [0xE001, 0x6050, 0xA010, 0x0003] + [0x0003] * 124
+    s["imem"] = [0xE001, 0x6050, 0xA010, 0x0003] + [0x0003] * (MEM_SIZE - 4)
     s["g2_ctrl"] = 0
+    s["cr"][0] = 0
+    s["negmask"] = 0
     s["pincfg"] = [0] * 10 + [0x0C, 0, 0]  # pin 10: engine 0, always drive
     s["flags"] = 0
     s["imem_writes"] = []
     for e in s["engines"]:
-        e["start"] = 0
+        e["start"], e["page"] = 0, 0
         e["regs"] = [0, 0, 0, 63, 0, 0, 0x10, 0x1A, 0, 0, 0, 0, 0, 0, 0]
     s["engines"][1]["start"] = 3
     return s
@@ -165,12 +180,15 @@ def stimulus(rng, s):
 async def load(chip, s):
     """Configure the chip. Always the same transactions, whatever the values."""
     await chip.set_quad()
+    await chip.write(regs.IMEM_ADDR_H, 0)
     await chip.write(regs.IMEM_ADDR, 0)
     await chip.write16(regs.IMEM_DATA, s["imem"])
     await chip.write(regs.G2_ADDR, 0)
     await chip.write(regs.G2_DATA, s["g2_table"])
     await chip.write(regs.G2_IN0, s["g2_in"] + [s["g2_state"]])
     await chip.write(regs.NEGSEL, s["negsel"])
+    await chip.write(regs.NEGOUT, [s["negout"], s["negmask"] & 0xFF, s["negmask"] >> 8])
+    await chip.write(regs.CR_CTRL, [s["cr"][0] & ~regs.CR_ENABLE] + s["cr"][1:])
     await chip.write(regs.PINCFG, s["pincfg"])
     for i, e in enumerate(s["engines"]):
         await chip.write16(regs.engine_reg(i, regs.INSTR), xy_loader(e["x"], e["y"]))
@@ -183,6 +201,7 @@ async def load(chip, s):
     await chip.write(regs.CMD, regs.CMD_RESTART0 | regs.CMD_RESTART1 | regs.CMD_CLEAR0 | regs.CMD_CLEAR1)
     for i, e in enumerate(s["engines"]):
         await chip.push(i, e["tx"])
+        await chip.force(i, 0xE000 | (3 << 5) | e["page"])  # set page
         await chip.force(i, e["start"])  # jmp start
     await chip.write(regs.FLAG_SET, s["flags"])
     await chip.cycles(20)
@@ -206,12 +225,15 @@ async def run(chip, s, stim):
     dut = chip.dut
     schedule = {
         G2_ON: (regs.G2_CTRL, s["g2_ctrl"]),
+        CR_ON: (regs.CR_CTRL, s["cr"][0]),
         EN_ON: (regs.CTRL, 3),
         EN_OFF: (regs.CTRL, 0),
         G2_OFF: (regs.G2_CTRL, 0),
+        CR_OFF: (regs.CR_CTRL, 0),
     }
     for at, (addr, word) in zip(IMEM_AT, s.get("imem_at", [])):
-        schedule[at] = (regs.IMEM_ADDR, [addr, word & 0xFF, word >> 8])
+        schedule[at - IMEM_H_LEAD] = (regs.IMEM_ADDR_H, addr >> 8)
+        schedule[at] = (regs.IMEM_ADDR, [addr & 0xFF, word & 0xFF, word >> 8])
     trace = []
     for c in range(CYCLES):
         await RisingEdge(dut.clk)
@@ -223,7 +245,10 @@ async def run(chip, s, stim):
         if c in schedule:
             cocotb.start_soon(chip.write(*schedule[c]))
         await ReadOnly()
-        trace.append((int(dut.uio_out.value), int(dut.uio_oe.value), int(dut.uo_out.value) >> 5))
+        first = (int(dut.uio_out.value), int(dut.uio_oe.value), int(dut.uo_out.value) >> 5)
+        await FallingEdge(dut.clk)
+        await ReadOnly()
+        trace.append((first, (int(dut.uio_out.value), int(dut.uio_oe.value), int(dut.uo_out.value) >> 5)))
     await RisingEdge(dut.clk)
     await chip.cycles(20)
     return trace
@@ -244,6 +269,7 @@ async def readback(chip):
     st["flags"] = await chip.read8(regs.FLAGS)
     st["sticky"] = await chip.read8(regs.STICKY)
     st["g2_state"] = await chip.read8(regs.G2_STATE)
+    st["cr_status"] = await chip.read8(regs.CR_STATUS)
     return st
 
 
@@ -255,6 +281,11 @@ def model_for(s, counter, latency):
     m.g2.in_sel = list(s["g2_in"])
     m.g2.write_state(s["g2_state"])
     m.negsel = s["negsel"]
+    m.negout, m.negmask = s["negout"], s["negmask"]
+    cr = s["cr"]
+    m.cr.write_ctrl(cr[0] & ~regs.CR_ENABLE)
+    m.cr.write_gain(cr[1])
+    m.cr.inc, m.cr.win, m.cr.sample = cr[2] | cr[3] << 8, cr[4], cr[5]
     m.pincfg = list(s["pincfg"])
     m.flags = s["flags"]
     m.counter = counter
@@ -272,7 +303,7 @@ def model_for(s, counter, latency):
         eng.side_base, eng.side_count = r[9] & 15, (r[9] >> 4) & 3
         eng.side_opt, eng.side_dirs = bool(r[9] & 0x40), bool(r[9] & 0x80)
         eng.jmp_base, eng.jmp_pattern = r[10] & 63, bool(r[10] & 0x40)
-        eng.page = eng.jpage = r[10] >> 7
+        eng.page = eng.jpage = e["page"]
         eng.status_n, eng.status_rx = r[11] & 15, bool(r[11] & 0x10)
         eng.lfsr_feed, eng.lfsr_mode, eng.lfsr_right = r[12] & 3, (r[12] >> 2) & 3, bool(r[12] & 0x10)
         eng.cap_pin, eng.cap_edge, eng.cap_flag_en = r[13] & 15, (r[13] >> 4) & 3, bool(r[13] & 0x40)
@@ -291,9 +322,11 @@ def model_run(m, s, stim, latency, watch=()):
     and the engine PCs at the cycles in `watch`."""
     writes = {
         G2_ON + latency: lambda: set_g2_ctrl(m, s["g2_ctrl"]),
+        CR_ON + latency: lambda: m.cr.write_ctrl(s["cr"][0]),
         EN_ON + latency: lambda: setattr(m, "enable", 3),
         EN_OFF + latency: lambda: setattr(m, "enable", 0),
         G2_OFF + latency: lambda: set_g2_ctrl(m, 0),
+        CR_OFF + latency: lambda: m.cr.write_ctrl(0),
     }
     for at, (addr, word) in zip(IMEM_AT, s.get("imem_at", [])):
         # Two more bytes than the other writes: the address, then the word.
@@ -308,7 +341,8 @@ def model_run(m, s, stim, latency, watch=()):
             settle(m, oe, out, s["pull_up"], ui)
         if c in watch:
             pcs[c] = [(e.page, e.pc) for e in m.engines]
-        trace.append(m.cycle(oe, out, s["pull_up"], ui))
+        late = m.pads(late=True)
+        trace.append((m.cycle(oe, out, s["pull_up"], ui), late))
     return (trace, pcs) if watch else trace
 
 
@@ -322,7 +356,7 @@ def place_imem_writes(s, stim, counter, latency):
     _, pcs = model_run(model_for(s, counter, latency), s, stim, latency, watch=effect)
     for (eng, off, word), c in zip(s["imem_writes"], effect):
         page, pc = pcs[c][eng]
-        addr = page * 64 + (pc + off) % 64 if off is not None else (word * 7) % 128
+        addr = page * 64 + (pc + off) % 64 if off is not None else (word * 7) % 512
         s["imem_at"].append((addr, word))
 
 
@@ -333,6 +367,7 @@ def set_g2_ctrl(m, v):
 
 def settle(m, oe, out, pull_up, ui):
     """Input path state after the setup, during which the inputs held."""
+    m.nfall = m.owner_value(m.negout)[0] if m.negout < 13 else 0
     uio_out, uio_oe, _ = m.pads()
     drive0 = (uio_oe & ~uio_out) | (oe & ~out)
     drive1 = (uio_oe & uio_out) | (oe & out)
@@ -350,7 +385,7 @@ def model_state(m):
         st[f"e{i}.dbg2"] = e.y
         st[f"e{i}.dbg3"] = e.isr
         st[f"e{i}.dbg4"] = e.osr
-        st[f"e{i}.dbg5"] = (e.osr_count << 8) | e.isr_count
+        st[f"e{i}.dbg5"] = (e.page << 13) | (e.osr_count << 8) | (e.jpage << 5) | e.isr_count
         st[f"e{i}.dbg6"] = e.next_instruction(m.imem)
         st[f"e{i}.levels"] = (len(e.buf.tx), len(e.buf.rx))
         st[f"e{i}.lfsr"] = e.lfsr
@@ -360,6 +395,7 @@ def model_state(m):
     st["flags"] = m.flags
     st["sticky"] = m.sticky
     st["g2_state"] = (m.g2.feed_full << 6) | (m.g2.out << 4) | m.g2.state
+    st["cr_status"] = (m.cr.miss << 4) | (m.cr.data << 1) | int(m.cr.locked)
     return st
 
 
@@ -371,7 +407,8 @@ def first_mismatch(chip_trace, model_trace):
 
 
 def fmt_pads(p):
-    return f"uio_out={p[0]:08b} uio_oe={p[1]:08b} uo[7:5]={p[2]:03b}"
+    """Pads in the first and second half of a cycle."""
+    return " / ".join(f"uio_out={h[0]:08b} uio_oe={h[1]:08b} uo[7:5]={h[2]:03b}" for h in p)
 
 
 # ------------------------------------------------------------------- test
@@ -406,7 +443,7 @@ async def test_random_programs_match_model(dut):
     await chip.start()
     s = calibration_setup()
     stim, trace, state = await one_run(chip, s, 0)
-    rise = next(c for c, p in enumerate(trace) if p[2] & 1)
+    rise = next(c for c, p in enumerate(trace) if p[0][2] & 1)
     latency = rise - 1 - EN_ON
     counter = state["e0.rx"][0] - (EN_ON + latency + 1)
     dut._log.info(f"calibration: Host write latency {latency} cycles, counter at start {counter}")

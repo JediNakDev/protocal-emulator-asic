@@ -7,9 +7,11 @@ from collections import namedtuple
 
 from . import records
 
-NODE_D, NODE_A, NODE_E, NODE_Q = 0, 1, 2, 3         # can_node symbols
+NODE_D, NODE_A, NODE_R, NODE_E, NODE_Q = 0, 1, 2, 3, 7   # can_node symbols
+NODE_REC, NODE_TEC = 6, 7       # can_node RAM entries of the error counters
 
 Frame = namedtuple("Frame", "ident data crc_ok acked ext rtr dlc")
+FLAG = "flag"       # parse_raw: an active error flag or an overload flag
 
 
 def crc15(bits):
@@ -79,12 +81,30 @@ def parse(bits):
 
 def node_tx_words(ident, data, ext=False, rtr=False, dlc=None):
     """Transmit words for can_node: the stuffed frame after the start of
-    frame, recessive bits as A and dominant as D, then E; 4 symbols per word."""
-    sym = [NODE_A if b else NODE_D for b in stuff(frame_bits(ident, data, ext, rtr, dlc))[1:]]
+    frame as 3-bit symbols, 5 per word, bits 2:0 first. A recessive bit is A
+    in the arbitration field (up to the RTR bit, with the stuff bits before
+    it) and R after it; a dominant one is D; the CRC delimiter is E."""
+    bits = frame_bits(ident, data, ext, rtr, dlc)
+    arb_end = 32 if ext else 12             # destuffed index of RTR
+    sym, run, last = [], 0, None
+    for i, b in enumerate(bits):
+        if i:
+            sym.append(NODE_D if not b else NODE_A if i <= arb_end else NODE_R)
+        run = run + 1 if b == last else 1
+        last = b
+        if run == 5:                        # a stuff bit of the other level
+            last, run = 1 - b, 1
+            sym.append(NODE_D if last == 0 else NODE_A if i < arb_end else NODE_R)
     sym.append(NODE_E)
-    while len(sym) % 4:
+    while len(sym) % 5:
         sym.append(NODE_Q)
-    return [sum(s << (2 * j) for j, s in enumerate(sym[i:i + 4])) for i in range(0, len(sym), 4)]
+    return [sum(s << (3 * j) for j, s in enumerate(sym[i:i + 5])) for i in range(0, len(sym), 5)]
+
+
+def node_counter(stored):
+    """can_node RAM entry NODE_REC or NODE_TEC -> the error counter, or None
+    while bus-off (TEC only)."""
+    return None if stored == 0xFFFF else 255 - stored
 
 
 def _value(bits):
@@ -128,11 +148,18 @@ def parse_raw(raw):
     A frame begins at a dominant bit after recessive ones; it is acked if
     the bus was dominant in its acknowledgement slot. A frame cut short by
     a stuff error, one with a dominant CRC delimiter, or one the bits end
-    in is returned as None."""
+    in is returned as None, and six dominant bits where a frame could begin
+    (after its end of frame bit 1, or after the ACK slot) as FLAG: an
+    error or overload flag. Bits from either until the next 7 recessive
+    bits are skipped."""
     frames, i = [], 0
     while i < len(raw):
         if raw[i]:
             i += 1
+            continue
+        if raw[i:i + 6] == [0] * 6:                     # no frame starts so
+            frames.append(FLAG)
+            i = _skip_flags(raw, i)
             continue
         bits, run, last, need = [], 0, None, None
         while i < len(raw) and len(bits) != need:
@@ -156,12 +183,24 @@ def parse_raw(raw):
             break
         if not ok or raw[i] == 0:                       # or a dominant CRC delimiter
             frames.append(None)
-            while i < len(raw) and not all(raw[i:i + 7]):
-                i += 1                                  # wait for 7 recessive bits
+            i = _skip_flags(raw, i)
             continue
         frames.append(_decode(bits, raw[i + 1] == 0))
-        i += 3                                          # delimiter, slot, delimiter
+        i += 2
+        if i < len(raw) and raw[i] == 0:                # a flag from the ACK delimiter
+            frames.append(FLAG)
+            i = _skip_flags(raw, i)
+            continue
+        i += 1                                          # delimiter, slot, delimiter
     return frames
+
+
+def _skip_flags(raw, i):
+    """Index of the next run of 7 recessive bits from i: the end of the
+    flags of an error or overload frame."""
+    while i < len(raw) and not all(raw[i:i + 7]):
+        i += 1
+    return i
 
 
 def raw_frames(words):

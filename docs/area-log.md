@@ -3,6 +3,135 @@
 Each entry records the source state, how the numbers were produced, and what they mean.
 Numbers from yosys are cell area before placement; routing, clock tree and fill are not included.
 
+## 2026-10-26: timing-driven builds, six-page flip-flops and eight-page latches
+
+Source: working branch `issue-14-remaining`, on `32b00c202aff6a85a6b1b14bcfbfc938e50ea11f`, local LibreLane 3.1.0.dev3 builds with the CMOS5L 8x4 template as in the entry below.
+An RTL hash here is the SHA-256 of `json.dumps({"src/<file>": sha256, ...}, sort_keys=True)` over the build's `src/*.v`.
+All builds add timing-driven placement and timing repair after global routing (`PL_TIMING_DRIVEN`, `RUN_POST_GRT_RESIZER_TIMING`, `RUN_POST_GRT_DESIGN_REPAIR` in `src/config.json`).
+
+| Build | RTL | Synthesized area | Placement utilization | Result |
+| --- | --- | --- | --- | --- |
+| 3 | Four pages of flip-flops, G7 with nearest-edge selection (RTL hash `beabf031...7e9c`) | 694,245 µm² | 61.1% | Complete: setup and hold met at every corner, DRC, LVS and antenna clean |
+| 4 | Six pages of flip-flops | 897,796 µm² | 78.7% | Failed: detailed placement of the clock tree (DPL-0036) |
+| 5 | Six pages, store reset simplified (6,913 tie cells to 1) | 845,749 µm² | 74.8% | Failed: DPL-0036 again |
+| 6 | Eight pages of latches (RTL hash `55dcbd7c...63e4`) | 698,232 µm² | 63.7%, 69.7% after CTS | Stopped after 24 hours in global routing: 296 overflows on Metal3 at 85% use |
+| 7 | As build 6, `CTS_APPLY_NDR` `none` | 698,232 µm² | 63.7%, 69.7% after CTS | Failed: clock tree synthesis disconnected 3 row enables (critical disconnected pins) |
+| 8 | Eight pages of latches, one clock-gating cell per row (RTL hash `87301e6a...a9e1`) | 696,141 µm² | 71.9% after CTS | Complete, DRC, LVS and antenna clean; slow-corner setup -2.005 ns |
+| 9 | As build 8, long-wire buffering and wider repair margins after global routing | 696,141 µm² | 72.3% after CTS | Routed; slow-corner setup -2.116 ns, fast-corner hold -0.026 ns; stopped during Magic DRC |
+| 10 | `out_raw` and `mask_n` shifters built from multiplexers (RTL hash `9eb0d482...65de`, the current RTL), 3 ns setup and 0.15 ns hold margins after global routing | 696,446 µm² | | Running |
+
+Build 3 at 50 MHz, after detailed-route extraction:
+
+| Corner | Setup worst slack | Failing setup endpoints | Hold worst slack |
+| --- | --- | --- | --- |
+| Fast, 1.32 V, -40 C | +4.397 ns | 0 | +0.110 ns |
+| Typical, 1.20 V, 25 C | +3.769 ns | 0 | +0.290 ns |
+| Slow, 1.08 V, 125 C | +0.126 ns | 0 | +0.610 ns |
+
+Build 3 standard-cell area is 862,464 µm² (71.4% utilization), with 150,715 µm² of timing-repair buffers; Magic DRC, LVS and router DRC report 0 errors and no antenna violations.
+It retains 419 fanout, up to 171 slew (slow corner) and 3 capacitance violations, unresolved.
+Its RTL is not the current one: four pages cannot hold the error-confinement CAN node (B9).
+
+Six pages of flip-flops do not leave the clock-tree buffers room to legalize at 75-79% utilization, so the store moved to latches (`sg13cmos5l_dlhrq_1`), which brings eight pages to about the four-page flip-flop build's area and utilization.
+`tools/measure.py` with the CMOS5L typical library maps the current RTL to 1,032,387 µm² with flip-flop storage and 695,722 µm² with latches (8,704 latches: the 512 instruction words and the 64 G2 table rows), before placement.
+
+Build 6's clock tree synthesis gives each latch row's gate, the registered decode ANDed with the inverted clock, its own tree: 3,594 clock nets.
+LibreLane's default `CTS_APPLY_NDR` of `half` routes them with double spacing; global routing then spent about 12 hours per pass disabling the rule net by net and still ended congested, so the build was stopped in the repair step after global routing.
+`src/config.json` now sets `CTS_APPLY_NDR` to `none`.
+
+Build 7 with default clock routing rules finished global routing in 87 seconds with 27 overflows, and detailed routing converged to 0 violations.
+The flow then stopped at its disconnected-pin check: the NOR3 cells driving the gates of instruction rows 193, 295 and 397 had each lost an input.
+The synthesized netlist connected all three inputs; clock tree synthesis removed them.
+Synthesis had folded the inverted clock into the address decode it shares between rows, so the clock passed through shared decode cells, and some row-gate cells received it on two inputs.
+On silicon those rows could not have been written correctly.
+The store now instantiates one clock-gating cell (`sg13cmos5l_lgcp_1`) per row, clocked by the inverted clock and enabled by the registered decode, so the decode carries no clock ([H2](spec.md#storage-implementation-h2)).
+Build 8 synthesizes 576 of them (512 instruction rows and 64 G2 table rows), 8,704 latches and no inferred latch, in 2,091 µm² less area than build 6.
+Build 7's timing repair after clock tree synthesis inserted 1,884 hold delay cells, mostly on the store's write data, which changes at the rising edge that closes the row being written.
+
+Build 8 at 50 MHz, after detailed-route extraction:
+
+| Corner | Setup worst slack | Failing setup endpoints | Hold worst slack |
+| --- | --- | --- | --- |
+| Fast, 1.32 V, -40 C | +4.175 ns | 0 | +0.015 ns |
+| Typical, 1.20 V, 25 C | +3.448 ns | 0 | +0.172 ns |
+| Slow, 1.08 V, 125 C | -2.005 ns | 54 | +0.437 ns |
+
+Standard-cell area is 902,998 µm² (74.7% utilization), with 160 fanout, 136 slew (slow corner) and 2 capacitance violations; Magic DRC, LVS and antenna checks pass.
+At 48 MHz (the step `OpenROAD.STAPostPNR` rerun with `CLOCK_PERIOD` 20.8333 on the same state), the slow corner is still -1.172 ns with 23 failing endpoints; hold is unchanged.
+The failing paths are full-cycle paths in engine logic, not the store's half-cycle paths; the worst loses about 4.5 ns in two minimum-size cells driving long nets (a NOR2 on a 1.5 mm net at 3.3 ns slew, an AOI22 on a 0.92 mm net at 2.6 ns).
+Repair after global routing found only 4 slew violations from its parasitic estimate; 610 nets are longer than 500 µm, and no maximum wire length was set.
+Build 9 sets a 400 µm maximum wire length for design repair after placement and after global routing, 30% slew and capacitance margins after global routing, and a 1 ns setup margin after global routing (`src/config.json`); repair after placement then buffered 331 long nets with 378 buffers.
+
+Build 9 at 50 MHz, after detailed-route extraction:
+
+| Corner | Setup worst slack | Failing setup endpoints | Hold worst slack |
+| --- | --- | --- | --- |
+| Fast, 1.32 V, -40 C | +4.170 ns | 0 | -0.026 ns (3 endpoints) |
+| Typical, 1.20 V, 25 C | +3.435 ns | 0 | +0.101 ns |
+| Slow, 1.08 V, 125 C | -2.116 ns | 42 | +0.358 ns |
+
+Standard-cell area is 932,001 µm² (77.1% utilization), with 144 fanout, 12 slew (slow corner) and 1 capacitance violation: wire-length buffering removed the slew violations but not the setup failure.
+The parasitic estimate after global routing was about 3 ns optimistic: repair at that point found no path within its 1 ns margin.
+Every failing path starts at an engine's `cur[13]` or `tx_level` and ends at its `cur` or `ir`, through the `out pc` target (`jmp_base` plus the bits `out` would shift out) and the 512-word fetch multiplexer.
+Yosys's `share` pass, which LibreLane 3.1.0.dev3 runs unconditionally (its `SYNTH_SHARE_RESOURCES` variable is not read), had merged each engine's `in` shift, OSR advance and `out_raw` shift into one shifter whose operand multiplexer is selected by the decoded opcode, putting about 9 ns of opcode decoding and operand selection ahead of the `jmp_base` adder.
+A 0.86 ns hold delay cell also sat on the decoding branch.
+`out_raw` and its mask are now built from explicit multiplexer stages, which `share` does not merge; the shifts that remain shared feed only registers.
+
+Gate-level simulation of build 8's routed netlist (`make GATES=yes` in `test/`, without timing) passes `test_every_instruction_word`, which fails on build 7's netlist at exactly words 193, 295 and 397, and one or more tests of each baseline protocol: `test_reset_state`, `test_page_jumps`, `test_instruction_pages`, `test_uart_tx_fast`, `test_uart_rx`, `test_spi_controller_mode0`, `test_i2c_controller_400khz`, `test_jtag_idcode_ir_dr_bypass`, `test_swd_read_write`, `test_ps2_chip_as_keyboard`, `test_ps2_chip_as_host`, `test_can_receive`, `test_can_node_transmit_error_counts`, `test_can_node_bus_integration`, `test_usb_get_descriptor`, `test_eth_receive` and `test_eth_transmit`.
+
+## 2026-10-24: four-page memory and clock recovery, local 8x4 build
+
+Source: working branch `issue-14-remaining`, based on `32b00c202aff6a85a6b1b14bcfbfc938e50ea11f`, with 256 flip-flop instruction words and `pe_cr.v` clock recovery.
+All eleven RTL files were compared byte-for-byte with the build snapshot at `/tmp/pe-build/src`.
+The SHA-256 of the sorted JSON map from RTL paths to their SHA-256 hashes is `26b8590ba3a6503e50cc127dad153713509246396940c81abcd3c92e28e60779`.
+The local evidence is in `output/issue14/rtl-manifest.json`, `measure.json`, `post-route-state.json`, the timing reports and the 40/48 MHz STA subdirectories.
+These are local generated artifacts, not published CI evidence.
+
+Tool: LibreLane 3.1.0.dev3 in `ghcr.io/librelane/librelane:3.1.0.dev3`, CMOS5L PDK, and the 8x4 template from tt-support-tools `d66cf179e7bc4d296362ab7e2e3b344dc3c4f665`.
+The build uses the existing 20 ns clock, 60% target placement density and 7 ns placement setup-repair margin.
+Detailed routing, parasitic extraction and post-route STA have completed; final Magic DRC, LVS and the remaining flow checks were still running when this entry was first recorded.
+This is not yet a passing hardening/precheck result.
+
+| Measure | Value |
+| --- | --- |
+| Die (8x4) | 1724.16 x 710.64 µm, 1.225 mm² |
+| Standard-cell area, excluding fill | 839,316 µm² |
+| Standard-cell utilization | 69.47% |
+| Timing-repair buffers | 145,373 µm² |
+| Sequential cells | 300,209 µm² |
+| Detailed-route DRC errors | 0 (router check; final Magic DRC is separate) |
+| Antenna net/pin violations after repair | 0 / 0 |
+
+At 50 MHz, after detailed-route extraction:
+
+| Corner | Setup worst slack | Failing setup endpoints | Hold worst slack |
+| --- | --- | --- | --- |
+| Fast, 1.32 V, -40 C | +5.859 ns | 0 | +0.087 ns |
+| Typical, 1.20 V, 25 C | +5.476 ns | 0 | +0.290 ns |
+| Slow, 1.08 V, 125 C | -3.157 ns | 64 | +0.610 ns |
+
+Slow-corner setup TNS is -162.729 ns.
+The worst path starts at G2 output 1, passes through the output-pin/readback path and engine 1 fetch selection, and ends at its instruction register.
+The reports also retain 427 fanout, up to 264 slew and up to 18 capacitance violations; these remain unresolved.
+
+The same routed netlist and extracted parasitics were re-analyzed at 40 and 48 MHz, changing the SDC clock period while retaining its absolute 4 ns input/output delays, clock uncertainty and loads.
+Both standalone STA runs completed successfully; their success means analysis completed, not that all timing constraints passed.
+
+| Clock profile | Fast setup | Typical setup | Slow setup | Worst hold |
+| --- | --- | --- | --- | --- |
+| 40 MHz | +7.359 ns | +7.365 ns | +1.843 ns | +0.087 ns |
+| 48 MHz | +6.109 ns | +6.115 ns | -2.324 ns | +0.087 ns |
+| 50 MHz | +5.859 ns | +5.476 ns | -3.157 ns | +0.087 ns |
+
+Only the 40 MHz profile passes setup and hold at every analyzed corner, and electrical violations still need resolution.
+This cannot replace the 48 and 50 MHz profiles required by the existing USB and CAN programs.
+The mandatory baseline and all-corner operating-clock requirement therefore remain incomplete.
+
+Verification of this working source: `make check` passes both storage variants' lint and synthesis checks, the fetch/FIFO/reset formal checks, four tooling tests and all 121 RTL cocotb cases.
+Five targeted functional gate-level cases pass on the post-route mapped netlist: instruction pages, page jumps, CAN transmit to a 1.5% fast peer, CAN underrun and recovery, and Ethernet receive jitter.
+The netlist SHA-256 is `d077df2dae1deaedafe5af3781e123188513e2bd4f22d2eca5bd8e0e99a14bf5`.
+These functional simulations have no delay annotation and do not establish timing closure; the full gate-level suite and Tiny Tapeout precheck remain acceptance gates.
+
 ## 2026-10-04: first complete RTL
 
 Source: the first full implementation of `docs/spec.md` (uncommitted at the time of measurement).

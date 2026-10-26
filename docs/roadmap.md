@@ -1,7 +1,7 @@
 # Competition roadmap
 
-Deliver a programmable, verified, routable protocol emulator in this project's current 6x4 allocation on IHP CMOS5L.
-The [organizer update and FAQ](competition-update.md) plans a maximum of 8x4 tiles, but says to design to 6x4 until the new template is available and treat 8x4 as an upgrade.
+Deliver a programmable, verified, routable protocol emulator in the current 8x4 allocation on IHP CMOS5L.
+The [organizer update and FAQ](competition-update.md) plans a maximum of 8x4 tiles, which is now available in CMOS5L tt-support-tools `d66cf17`; the current implementation uses that template.
 Users must be able to load new programs after fabrication and implement protocols within documented timing and I/O limits.
 The [competition announcement](https://blog.janestreet.com/protocol-emulator-asic-competition/) sets the submission deadline at January 18, 2027.
 The priorities and acceptance criteria below are this project's working plan.
@@ -24,12 +24,12 @@ The organizers' optional stretch goals are mandatory capabilities for this proje
 The current architecture and instruction semantics are defined in [spec.md](spec.md).
 The initial single-engine UART exercise has been superseded by the implemented programmable design.
 Recorded builds meet 50 MHz at the typical corner; all-corner setup closure remains open.
-The latest measured RTL (`17995b3`) reaches +4.05 ns typical-corner setup slack and -4.14 ns slow-corner setup slack.
+The previously published measured RTL (`17995b3`) reaches +4.05 ns typical-corner setup slack and -4.14 ns slow-corner setup slack. A local 8x4 build of the earlier four-page flip-flop source closed 50 MHz at every corner (+0.13 ns slow-corner setup, +0.11 ns hold) with clean DRC and LVS; the current eight-page latch source is still being measured.
 
 [The issue #14 design review](design-review.md) defines the next architecture choices and their evidence gates.
 Timed waits, shift-count reads, exact receive records, all four SPI controller modes with chip select and I2C reads are implemented in the current working source.
-USB keep-alive and reset, PS/2 deadlines and on-chip CAN acknowledgement are implemented; the CAN node fills all 128 instruction words.
-CAN error signaling (B9) needs more instruction memory or denser instructions, and Ethernet receive margin (B12) needs a larger decoder or a faster clock; both wait on the decisions recorded in the design review.
+USB keep-alive and reset, PS/2 deadlines, on-chip CAN acknowledgement and the CAN transmit underrun guard (B14) are implemented.
+The October 26 follow-up completes CAN error confinement (B9) in a node pair of 511 of the 512 instruction words, and Ethernet receive margin at the 802.3 jitter limit (B12) with general clock recovery at 50 MHz, both in RTL simulation; memory grew to eight pages of latches, beyond the owner's 256-word decision, which the owner should confirm. Routed timing of the current source and its gate-level tests remain open. The follow-up and its evidence are recorded in the design review and area log.
 Develop these capabilities alongside physical feasibility; timing closure on the current demonstrations alone does not freeze an adequate architecture.
 
 ## 1. Confirm physical closure

@@ -162,7 +162,8 @@ async def test_empty_fifo_read_during_arrival(dut, quad, arrival_byte, engine):
         for group_index, group in enumerate(groups):
             chip._set_host(0, 0, group)
             await chip.cycles(HALF)
-            hdo = chip._hdo()
+            hdo, unknown = chip._hdo()
+            assert not unknown, "HDO is X or Z"
             value = (value << 4) | hdo if quad else (value << 1) | (hdo & 1)
             chip._set_host(0, 1, group)
             await chip.cycles(HALF)

@@ -19,7 +19,7 @@ evaluates, and the registers update at the closing edge.
 M16 = 0xFFFF
 M32 = 0xFFFFFFFF
 PAGE_SIZE = 64   # instruction memory page: PC, jump targets and wrap bounds
-MEM_SIZE = 2 * PAGE_SIZE
+MEM_SIZE = 8 * PAGE_SIZE
 
 # Opcodes, bits 15:13
 JMP0, JMP1, WAIT, IN, OUT, CTRL, MOV, SET = range(8)
@@ -197,7 +197,10 @@ class Engine:
         return self.osr_count >= self.pull_thr()
 
     def next_instruction(self, imem):
-        return self.exec_instr if self.exec_valid else imem[self.page * PAGE_SIZE + self.pc]
+        if self.exec_valid:
+            return self.exec_instr
+        addr = self.page * PAGE_SIZE + self.pc
+        return imem[addr] if addr < MEM_SIZE else 0
 
     def side_fields(self, sd):
         """(side-set enabled, value, delay) from instruction bits 12:8."""
@@ -439,7 +442,7 @@ class Engine:
                 elif dst == 2:
                     y = v
                 elif dst == 3:
-                    n["jpage"] = v & 1
+                    n["jpage"] = v & 7
                 elif dst == 4:
                     pin_dir = write_range(pin_dir, self.set_base, self.set_cnt(), v)
 
@@ -505,10 +508,112 @@ class Engine:
             self.buf.mem[i] = v & M16
 
 
+class ClockRecovery:
+    """Clock recovery (G7): a phase-locked loop on the edges of one pin."""
+
+    def __init__(self):
+        self.enable, self.double, self.lock_edge, self.pin = False, False, 0, 0
+        self.shift, self.loss, self.inc, self.win, self.sample = 0, 0, 0, 0, 0
+        self.reset_state()
+
+    def reset_state(self):
+        self.phase, self.prev, self.armed, self.miss = 0, 0, False, 0
+        self.have, self.best_e, self.best_v = False, 0, 0   # the selected edge
+        self.corrections = 0     # selected edges since locking, the locking edge included
+        self.strobe, self.data, self.locked = False, 0, False
+
+    def write_ctrl(self, v):
+        self.enable, self.double = bool(v & 1), bool(v & 2)
+        self.lock_edge, self.pin = (v >> 2) & 3, v >> 4
+
+    def write_gain(self, v):
+        self.shift, self.loss = v & 15, v >> 4
+
+    @staticmethod
+    def _signed(v):
+        v &= M16
+        return v - 0x10000 if v & 0x8000 else v
+
+    @staticmethod
+    def _dist(e):
+        """Distance from phase zero in 1/256 bit, from the top byte."""
+        hi = (e >> 8) & 0xFF
+        return (~hi & 0x7F) if hi & 0x80 else hi & 0x7F
+
+    def evaluate(self, pins):
+        """Next state, from this cycle's samples."""
+        s0 = _bit(pins, self.pin)
+        s1 = _bit(pins, 15)
+        last = s1 if self.double else s0
+        if not self.enable:
+            return dict(phase=0, prev=last, armed=False, have=False, best_e=0, best_v=0, miss=0,
+                        corrections=0, strobe=False, data=0, locked=False)
+        half = self.inc >> 1
+        e0, e1 = (self.phase - half) & M16, (self.phase + half) & M16
+        edge0 = self.prev != s0
+        edge1 = self.double and s0 != s1
+        c0 = edge0 and self._dist(e0) < self.win
+        c1 = edge1 and self._dist(e1) < self.win
+        r0 = (self.phase - 256 * self.sample + half) & M16
+        r1 = (r0 + self.inc) & M16
+        far0, far1 = bool(r0 & 0x8000), bool(r1 & 0x8000)
+        fire0 = self.locked and self.armed and not far0
+        fire1 = self.locked and self.double and far0 and not far1
+        fire = fire0 or fire1
+        # Selection: nearest phase zero, the earlier of equally near edges.
+        h0, es0, vs0 = self.have, self.best_e, self.best_v
+        if c0 and not (h0 and self._dist(es0) <= self._dist(e0)):
+            es0, vs0 = e0, s0
+        h0 = h0 or c0
+        h1, es1, vs1 = h0, es0, vs0
+        if c1 and not (h1 and self._dist(es1) <= self._dist(e1)):
+            es1, vs1 = e1, s1
+        h1 = h1 or c1
+        sel, sel_e, sel_v = (h1, es1, vs1) if fire1 else (h0, es0, vs0)
+        step = 2 * self.inc if self.double else self.inc
+        n = dict(prev=last, strobe=fire, data=self.data, locked=self.locked, armed=self.armed,
+                 have=self.have, best_e=self.best_e, best_v=self.best_v, miss=self.miss,
+                 corrections=self.corrections)
+        corr = 0
+        lock = []
+        if not self.locked:
+            if edge0 and (self.lock_edge >= 2 or s0 == 1 - self.lock_edge):
+                lock = [(e0, s0)]
+            if edge1 and (self.lock_edge >= 2 or s1 == 1 - self.lock_edge):
+                lock = [(e1, s1)]
+        if lock:
+            corr = lock[-1][0]
+            n.update(locked=True, armed=True, have=True, best_e=0, best_v=lock[-1][1], miss=0,
+                     corrections=0)
+        elif self.locked:
+            n["armed"] = far1 if self.double else far0
+            if fire:
+                if sel:
+                    nth = min(self.corrections + 1, M16)
+                    corr = (self._signed(sel_e) >> min(self.shift, nth.bit_length() - 1)) & M16
+                    n.update(data=sel_v, corrections=nth, miss=0)
+                else:
+                    n["data"] = s1 if fire1 else s0
+                    if self.miss >= self.loss and self.loss != 15:
+                        n["locked"] = False
+                    n["miss"] = min(self.miss + 1, 15)
+                # An edge after the strobed sample starts the next selection.
+                n.update(have=bool(fire0 and c1), best_e=(e1 - corr) & M16, best_v=s1)
+            else:
+                n.update(have=h1, best_e=es1, best_v=vs1)
+        n["phase"] = (self.phase + step - corr) & M16
+        return n
+
+    def commit(self, n):
+        for k, v in n.items():
+            setattr(self, k, v)
+
+
 class G2:
     """Bit state machine (G2)."""
 
-    def __init__(self):
+    def __init__(self, cr):
+        self.cr = cr
         self.table = [0] * 64
         self.enable, self.owner, self.mode, self.emit_en, self.emit_other = False, 0, 0, False, False
         self.in_sel = [0, 0]
@@ -523,6 +628,12 @@ class G2:
             return self.feed_bit
         if sel == 17:
             return int(self.feed_full)
+        if sel == 18:
+            return self.cr.data
+        if sel == 19:
+            return int(self.cr.locked)
+        if sel == 20:
+            return int(self.cr.strobe)
         return 0
 
     def write_state(self, v):
@@ -533,7 +644,8 @@ class G2:
 
     def evaluate(self, pins, owner_tick, feed_wr, feed_bit):
         entry = self.table[(self.state << 2) | (self.source(self.in_sel[1], pins) << 1) | self.source(self.in_sel[0], pins)]
-        step = self.enable and (self.mode == 0 or (self.mode == 1 and owner_tick) or (self.mode == 2 and self.feed_full))
+        step = self.enable and (self.mode == 0 or (self.mode == 1 and owner_tick) or (self.mode == 2 and self.feed_full)
+                                or (self.mode == 3 and self.cr.strobe))
         n = {"emit_pending": bool(step and _bit(entry, 6) and self.emit_en)}
         if step:
             n.update(state=entry & 15, out=(entry >> 4) & 3, emit_bit=_bit(entry, 4))
@@ -552,13 +664,17 @@ class Chip:
     def __init__(self):
         self.imem = [0] * MEM_SIZE
         self.engines = [Engine(0), Engine(1)]
-        self.g2 = G2()
+        self.cr = ClockRecovery()
+        self.g2 = G2(self.cr)
         self.enable = 0          # CTRL bits 1:0
         self.flags = 0
         self.sticky = 0
         self.counter = 0
         self.pincfg = [0] * 13
         self.negsel = 0
+        self.negout = 0          # NEGOUT source pin
+        self.negmask = 0         # NEGMASK, 13 bits
+        self.nfall = 0           # NEGOUT pin value sampled on the last falling edge
         # Input path registers for pins 0-9
         self.sync1 = self.sync2 = 0
         self.filt = 0
@@ -566,18 +682,29 @@ class Chip:
         self.neg = 0             # falling-edge sample, retimed
 
     # -- pin block
-    def pads(self):
-        """(uio_out, uio_oe, uo[7:5]) driven during this cycle."""
+    def owner_value(self, i):
+        """(value after the invert bit, direction) of pin i's owner."""
+        cfg = self.pincfg[i]
+        owner = cfg & 3
+        if owner < 2:
+            e = self.engines[owner]
+            v, d = _bit(e.pin_out, i), _bit(e.pin_dir, i)
+        else:
+            v, d = _bit(self.g2.out, owner - 2), 1
+        return v ^ _bit(cfg, 4), d
+
+    def pads(self, late=False):
+        """(uio_out, uio_oe, uo[7:5]) driven during the first half of this
+        cycle, or the second half if `late`: pins in NEGMASK follow a change
+        of the NEGOUT pin on the falling edge."""
+        nfall = self.nfall
+        if late:
+            nfall = self.owner_value(self.negout)[0] if self.negout < 13 else 0
         uio_out = uio_oe = uo = 0
         for i in range(13):
             cfg = self.pincfg[i]
-            owner = cfg & 3
-            if owner < 2:
-                e = self.engines[owner]
-                v, d = _bit(e.pin_out, i), _bit(e.pin_dir, i)
-            else:
-                v, d = _bit(self.g2.out, owner - 2), 1
-            v ^= _bit(cfg, 4)
+            v, d = self.owner_value(i)
+            v ^= _bit(self.negmask, i) & nfall
             drive = (cfg >> 2) & 3
             oe, val = ((0, 0), (d, v), (1 - v, 0), (1, v))[drive]
             if i < 8:
@@ -602,11 +729,16 @@ class Chip:
     def cycle(self, ext_oe=0, ext_out=0, pull_up=0, ui_pins=0):
         """Advance one clock cycle. Board inputs hold for the whole cycle;
         `ui_pins` is pins 8 and 9. Returns the pads of this cycle."""
+        def board(pads):
+            out, oe, _ = pads
+            drive0 = (oe & ~out) | (ext_oe & ~ext_out)
+            drive1 = (oe & out) | (ext_oe & ext_out)
+            return (~drive0 & (drive1 | pull_up) & 0xFF) | ((ui_pins & 3) << 8)
         uio_out, uio_oe, uo = self.pads()
-        drive0 = (uio_oe & ~uio_out) | (ext_oe & ~ext_out)
-        drive1 = (uio_oe & uio_out) | (ext_oe & ext_out)
-        uio_in = ~drive0 & (drive1 | pull_up) & 0xFF
-        raw = uio_in | ((ui_pins & 3) << 8)
+        # The falling edge samples the pads of the first half of the cycle;
+        # rising-edge samplers, and bypassed inputs, see the second half.
+        raw_early = board((uio_out, uio_oe, uo))
+        raw = board(self.pads(late=True))
         pins = self.pin_space(raw)
 
         g2_owner = self.g2.owner
@@ -617,6 +749,10 @@ class Chip:
             effects.append(eng.evaluate(self, bool(_bit(self.enable, i)), pins, g2_owner == i, emit, self.g2.emit_bit))
         own = effects[g2_owner]
         g2n = self.g2.evaluate(pins, own["div_tick"], own["feed_wr"], own["feed_bit"])
+        crn = self.cr.evaluate(pins)
+
+        # The falling edge samples the NEGOUT pin as driven in this cycle.
+        nfall_next = self.owner_value(self.negout)[0] if self.negout < 13 else 0
 
         # Closing edge
         flag_set = effects[0]["flag_set"] | effects[1]["flag_set"]
@@ -626,6 +762,7 @@ class Chip:
         for eng, e in zip(self.engines, effects):
             eng.commit(e)
         self.g2.commit(g2n)
+        self.cr.commit(crn)
         for i in range(10):
             path = _bit(raw, i) if self.pincfg[i] & 0x20 else _bit(self.sync2, i)
             n_req = (2, 2, 4, 8)[self.pincfg[i] >> 6]
@@ -637,7 +774,8 @@ class Chip:
             else:
                 self.fcount[i] += 1
         self.sync2, self.sync1 = self.sync1, raw
-        self.neg = _bit(raw, self.negsel) if self.negsel < 10 else 0
+        self.neg = _bit(raw_early, self.negsel) if self.negsel < 10 else 0
+        self.nfall = nfall_next
         self.counter = (self.counter + 1) & M32
         return uio_out, uio_oe, uo
 

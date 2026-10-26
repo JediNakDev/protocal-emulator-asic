@@ -138,25 +138,35 @@ class Chip:
         self._ui_apply()
 
     def _hdo(self):
-        return self.uo() & 0xF
+        """HDO's four pins (an X on another output is not the Host's), and a
+        mask of those that are X or Z, which read as 0."""
+        bits = str(self.dut.uo_out.value)[-4:]
+        value = int("".join(b if b in "01" else "0" for b in bits), 2)
+        unknown = int("".join("0" if b in "01" else "1" for b in bits), 2)
+        return value, unknown
 
     async def xfer(self, out_bytes, half=HALF):
-        """One transaction. Returns the bytes the chip shifted out."""
+        """One transaction. Returns the bytes the chip shifted out, and notes
+        in unknown_bytes the indices of those with an X or Z bit."""
         clk = self.dut.clk
+        self.unknown_bytes = []
         self._set_host(0, 0, 0)
         await ClockCycles(clk, half)
         got = []
-        for b in out_bytes:
-            r = 0
+        for n, b in enumerate(out_bytes):
+            r, unknown = 0, 0
             groups = [(b >> 4) & 0xF, b & 0xF] if self.quad else [(b >> (7 - i)) & 1 for i in range(8)]
             for g in groups:
                 self._set_host(0, 0, g)
                 await ClockCycles(clk, half)
-                hdo = self._hdo()
+                hdo, x = self._hdo()
                 r = (r << 4) | hdo if self.quad else (r << 1) | (hdo & 1)
+                unknown |= x if self.quad else x & 1
                 self._set_host(0, 1, g)
                 await ClockCycles(clk, half)
             got.append(r)
+            if unknown:
+                self.unknown_bytes.append(n)
         self._set_host(0, 0, 0)
         await ClockCycles(clk, half)
         self._set_host(1, 0, 0)
@@ -171,6 +181,8 @@ class Chip:
 
     async def read(self, addr, n=1):
         r = await self.xfer([0x80 | (addr & 0x7F)] + [0] * n)
+        if any(i > 0 for i in self.unknown_bytes):
+            raise ValueError(f"HDO was X or Z reading {addr:#04x}")
         return r[1:]
 
     async def read8(self, addr):
@@ -215,7 +227,8 @@ class Chip:
         """Write a Program (or source text) to instruction memory."""
         if isinstance(prog, str):
             prog = assemble(prog)
-        await self.write(regs.IMEM_ADDR, offset)
+        await self.write(regs.IMEM_ADDR_H, offset >> 8)
+        await self.write(regs.IMEM_ADDR, offset & 0xFF)
         await self.write16(regs.IMEM_DATA, prog.words(offset))
         return prog
 
@@ -223,7 +236,8 @@ class Chip:
                            out_base=0, out_count=1, set_base=0, set_count=1, in_base=0,
                            jmp_pin=0, side_base=0, execcfg=0, statuscfg=0):
         """Configure engine `e` for a loaded Program and jump to its start.
-        `offset` is the memory address (0-127); its page goes to EXECCFG bit 7."""
+        `offset` is the memory address (0-511); a forced `set page` selects its
+        page for the forced jump."""
         page = offset // 64
         await self.ereg(e, regs.CLKDIV, [clkdiv & 0xFF, clkdiv >> 8,
                                          prog.page_address(prog.wrap_target, offset),
@@ -232,8 +246,9 @@ class Chip:
                                             (out_base & 15) | ((out_count & 15) << 4),
                                             (set_base & 15) | ((set_count & 7) << 4),
                                             (in_base & 15) | ((jmp_pin & 15) << 4),
-                                            prog.sidepin(side_base), execcfg | page << 7, statuscfg])
+                                            prog.sidepin(side_base), execcfg, statuscfg])
         await self.write(regs.CMD, regs.CMD_RESTART0 << e)
+        await self.force_asm(e, f"set page, {page}")
         await self.force(e, offset & 0x3F)  # jmp to the program start
 
     async def force(self, e, word):

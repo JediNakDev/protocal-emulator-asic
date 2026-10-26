@@ -4,7 +4,7 @@ An open-source chip for hardware debugging, protocol experiments, and reverse en
 Upload programs through the Host port to change protocol behavior after fabrication.
 The same RTL runs UART, SPI, I2C, JTAG, SWD, PS/2, CAN, low-speed USB, and 10BASE-T programs in simulation.
 
-Two programmable engines share 128 instruction words, in two pages of 64, and control 13 protocol pins.
+Two programmable engines share 512 instruction words, in eight pages of 64, and control 13 protocol pins.
 General building blocks provide checksums, line decoding, edge timestamps, input filtering, and cycle-exact pin operations.
 Capture and replay programs can record a waveform, edit it on the Host, and replay it for fault injection without decoding its protocol.
 See [protocol coverage and limits](docs/protocols.md) for the supported roles, timing, buffering requirements, and external hardware.
@@ -14,14 +14,15 @@ See [protocol coverage and limits](docs/protocols.md) for the supported roles, t
 The programmable core, protocol programs, independent peer tests, random reference-model comparisons, and selected formal checks are implemented.
 Recorded CMOS5L builds passed hardening, precheck, and functional gate-level simulation.
 Those builds met the 50 MHz target at the typical corner but failed setup timing at the slow corner.
-The latest measured RTL (`17995b3`) has +4.05 ns typical-corner setup slack and -4.14 ns slow-corner setup slack, so all-corner timing closure remains open.
+The previously published measured RTL (`17995b3`) has +4.05 ns typical-corner setup slack and -4.14 ns slow-corner setup slack, so all-corner timing closure remains open.
+A local 8x4 build of the earlier four-page flip-flop source closed 50 MHz at every corner (+0.13 ns slow-corner setup, +0.11 ns hold) with clean DRC and LVS; the current eight-page latch source is still being measured.
 [The area log](docs/area-log.md) ties each measurement to its source state; [the roadmap](docs/roadmap.md) defines the remaining work.
 [The issue #14 design review](docs/design-review.md) records protocol gaps, shared timing and framing interfaces, measured resource needs, and the experiments required before freezing the architecture.
 
 | Setting | Value |
 | --- | --- |
 | Process | IHP 130nm CMOS5L (`ihp-sg13cmos5l`) |
-| Allocation | 6x4 Tiny Tapeout tiles |
+| Allocation | 8x4 Tiny Tapeout tiles |
 | Top module | `tt_um_jedinakdev_protocol_emulator` |
 | Clock target | 50 MHz (`CLOCK_PERIOD=20` ns) |
 | Submission deadline | January 18, 2027, per the [competition announcement](https://blog.janestreet.com/protocol-emulator-asic-competition/) |
