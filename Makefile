@@ -41,7 +41,8 @@ synth-check:
 FORMAL_PROPS := fetch:2 fifo:2 reset:8
 # The behavioral model of the instruction store's latch cells
 # (sg13cmos5l_dlhrq_1 in synthesis) is a latch by design; any other latch
-# yosys infers is still reported.
+# yosys infers is still reported. The full log is searched, since some yosys
+# versions omit latch inference from quiet output.
 STORE_LATCH := Latch inferred for signal .*pe_store\.\\\\g_row\[[0-9]*\]\.g_bit\[[0-9]*\]\.bit_q
 FORMAL_SOLVER ?= z3
 
@@ -49,9 +50,9 @@ formal:
 	@mkdir -p formal/build
 	@set -e; for p in $(FORMAL_PROPS); do \
 	  name=$${p%%:*}; steps=$${p##*:}; \
-	  yosys -q -p "read_verilog -formal formal/$$name.v $(RTL_SOURCES); prep -top $${name}_props; flatten; memory -nomap; async2sync; dffunmap; opt_clean; write_smt2 -wires formal/build/$$name.smt2.tmp" > formal/build/$$name.yosys.log 2>&1 || { cat formal/build/$$name.yosys.log; exit 1; }; \
+	  yosys -p "read_verilog -formal formal/$$name.v $(RTL_SOURCES); prep -top $${name}_props; flatten; memory -nomap; async2sync; dffunmap; opt_clean; write_smt2 -wires formal/build/$$name.smt2.tmp" > formal/build/$$name.yosys.log 2>&1 || { cat formal/build/$$name.yosys.log; exit 1; }; \
 	  mv formal/build/$$name.smt2.tmp formal/build/$$name.smt2; \
-	  grep -v -e "Replacing memory" -e "$(STORE_LATCH)" formal/build/$$name.yosys.log || true; \
+	  grep -e "Warning:" -e "Latch inferred" formal/build/$$name.yosys.log | grep -v -e "Replacing memory" -e "$(STORE_LATCH)" || true; \
 	  yosys-smtbmc -s $(FORMAL_SOLVER) -t $$steps formal/build/$$name.smt2 > formal/build/$$name.log || { cat formal/build/$$name.log; exit 1; }; \
 	  echo "formal: $$name passed"; \
 	done
