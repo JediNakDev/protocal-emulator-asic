@@ -20,12 +20,33 @@
   "CLOCK_PERIOD": 20,
 
   "//": "Hold slack margin - Increase them in case you are getting hold violations.",
+  "//": "Extraction found 26 ps less hold slack than the estimate after global routing (build 9).",
   "PL_RESIZER_HOLD_SLACK_MARGIN": 0.1,
-  "GRT_RESIZER_HOLD_SLACK_MARGIN": 0.05,
+  "GRT_RESIZER_HOLD_SLACK_MARGIN": 0.15,
 
   "//": "Detailed-route extraction adds about 6 ns beyond placement estimates on this design.",
   "//": "Repair setup paths before routing with 7 ns of margin while retaining the 20 ns clock.",
   "PL_RESIZER_SETUP_SLACK_MARGIN": 7.0,
+
+  "//": "Timing-driven placement and repair after global routing close the slow corner at 20 ns;",
+  "//": "without them the slow-corner setup slack is about -3 ns (docs/area-log.md).",
+  "PL_TIMING_DRIVEN": true,
+  "RUN_POST_GRT_RESIZER_TIMING": true,
+  "RUN_POST_GRT_DESIGN_REPAIR": true,
+
+  "//": "The eight-page store spreads logic across the tile: 610 nets ran over 500 um, some from minimum-size",
+  "//": "cells, and routed slew on them cost the slow corner 2 ns (build 8 in docs/area-log.md).",
+  "//": "Buffer long wires, and repair after global routing with margin for the estimate's error:",
+  "//": "in build 9 it was 3 ns optimistic at the slow corner.",
+  "DESIGN_REPAIR_MAX_WIRE_LENGTH": 400,
+  "GRT_DESIGN_REPAIR_MAX_WIRE_LENGTH": 400,
+  "GRT_DESIGN_REPAIR_MAX_SLEW_PCT": 30,
+  "GRT_DESIGN_REPAIR_MAX_CAP_PCT": 30,
+  "GRT_RESIZER_SETUP_SLACK_MARGIN": 3.0,
+
+  "//": "Each store row has its own clock-gating cell (H2 in docs/spec.md): 576 gated clocks, each with its own tree.",
+  "//": "Double-spaced clock routing on all of them congests Metal3, so clock nets use default rules.",
+  "CTS_APPLY_NDR": "none",
 
   "//": "RUN_LINTER, LINTER_INCLUDE_PDK_MODELS - Disabling the linter is not recommended!",
   "RUN_LINTER": 1,

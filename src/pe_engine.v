@@ -31,10 +31,10 @@ module pe_engine #(
     input  wire [2:0]  dbg_sel,
     // Instruction memory: one read port in this engine's page, and the Host
     // write port for snooping
-    output wire [6:0]  fetch_addr,
+    output wire [8:0]  fetch_addr,
     input  wire [15:0] imem_data,
     input  wire        imem_we,
-    input  wire [6:0]  imem_waddr,
+    input  wire [8:0]  imem_waddr,
     input  wire [15:0] imem_wdata,
     // Pins
     input  wire [15:0] pins_in,
@@ -66,8 +66,7 @@ module pe_engine #(
     ,
     // Fetch state for formal/fetch.v
     output wire [5:0]  f_pc,
-    output wire        f_page,
-    output wire        f_page_wr,
+    output wire [2:0]  f_page,
     output wire [15:0] f_ir,
     output wire [15:0] f_cur,
     output wire        f_exec_valid
@@ -224,9 +223,8 @@ module pe_engine #(
   // ======================================================== execution state
   reg [5:0]  pc;
   // `page` is the page PC addresses; `jpage` the page of the next jump taken,
-  // which `set page` writes. A Host write to EXECCFG bit 7 sets both.
-  reg        page, jpage;
-  wire       page_wr = wr & (off == 5'h0A);
+  // which `set page` writes.
+  reg [2:0]  page, jpage;
   reg [15:0] ir;   // the instruction memory word at PC, fetched one cycle ahead
   reg [15:0] cur;  // the instruction the next issue runs: the exec slot if full, else `ir`
   reg [15:0] x, y, isr, osr;
@@ -363,9 +361,27 @@ module pe_engine #(
     end
   endfunction
 
+  // Logical right shift from explicit multiplexer stages. Yosys's `share`
+  // pass merges shift operators used under exclusive conditions into one
+  // shifter whose operands the opcode selects. For `out_raw` that put opcode
+  // decoding ahead of the shifter on the `out pc` fetch path (build 9 in
+  // docs/area-log.md); multiplexers are not shared.
+  function [15:0] shr16;
+    input [15:0] v;
+    input [3:0]  n;
+    reg   [15:0] s;
+    begin
+      s     = n[0] ? {1'b0, v[15:1]} : v;
+      s     = n[1] ? {2'b0, s[15:2]} : s;
+      s     = n[2] ? {4'b0, s[15:4]} : s;
+      shr16 = n[3] ? {8'b0, s[15:8]} : s;
+    end
+  endfunction
+
   wire [15:0] pins_rot = (pins_in >> in_base) | (pins_in << (5'd16 - {1'b0, in_base}));
   wire        pat_match = ((pins_in & y) == x);
-  wire [15:0] mask_n = 16'hFFFF >> (5'd16 - nbits);
+  wire [3:0]  out_shift = 4'd0 - instr[3:0];  // 16 - nbits, as nbits 16 is encoded 0
+  wire [15:0] mask_n = shr16(16'hFFFF, out_shift);
   wire [3:0]  st_level = status_sel ? rx_level : tx_level;
   wire [15:0] status_val = ({1'b0, st_level} < {1'b0, status_n}) ? 16'hFFFF : 16'h0000;
 
@@ -415,7 +431,7 @@ module pe_engine #(
   wire        refill = autopull & osr_empty;
   wire [15:0] osr_src = refill ? tx_data : osr;
   wire [4:0]  osr_cnt_src = refill ? 5'd0 : osr_cnt;
-  wire [15:0] out_raw = out_right ? (osr_src & mask_n) : (osr_src >> (5'd16 - nbits));
+  wire [15:0] out_raw = out_right ? (osr_src & mask_n) : shr16(osr_src, out_shift);
   wire [15:0] osr_after = out_right ? (osr_src >> nbits) : (osr_src << nbits);
 
   // Checksum register (G1): one step per cycle, from a G2 emission or from
@@ -472,7 +488,7 @@ module pe_engine #(
   wire [5:0] pc_seq = (pc == wrap_top) ? wrap_bot : pc + 6'd1;
 
   wire [5:0] next_pc = jumps ? jtarget : pc_seq;
-  wire       next_page = jumps ? jpage : page;
+  wire [2:0] next_page = jumps ? jpage : page;
   assign fetch_addr = {next_page, next_pc};
   wire [15:0] fetch_word = (imem_we && imem_waddr == fetch_addr) ? imem_wdata : imem_data;
   wire [15:0] hold_word = (imem_we && imem_waddr == {page, pc}) ? imem_wdata : ir;
@@ -488,7 +504,7 @@ module pe_engine #(
 
   // ============================================================ next state
   reg [5:0]  n_pc;
-  reg        n_page, n_jpage;
+  reg [2:0]  n_page, n_jpage;
   reg [15:0] n_ir, n_cur;
   reg [15:0] n_x, n_y, n_isr, n_osr, n_exec_instr;
   reg [4:0]  n_isr_cnt, n_osr_cnt, n_delay;
@@ -709,7 +725,7 @@ module pe_engine #(
               3'd0: n_pin_out = wr_range(pin_out, set_base, set_cnt, {11'd0, instr[4:0]});
               3'd1: n_x = {11'd0, instr[4:0]};
               3'd2: n_y = {11'd0, instr[4:0]};
-              3'd3: n_jpage = instr[0];
+              3'd3: n_jpage = instr[2:0];
               3'd4: n_pin_dir = wr_range(pin_dir, set_base, set_cnt, {11'd0, instr[4:0]});
               default: ;
             endcase
@@ -765,8 +781,8 @@ module pe_engine #(
   always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       pc         <= 6'd0;
-      page       <= 1'b0;
-      jpage      <= 1'b0;
+      page       <= 3'd0;
+      jpage      <= 3'd0;
       ir         <= 16'd0;
       cur        <= 16'd0;
       x          <= 16'd0;
@@ -784,8 +800,8 @@ module pe_engine #(
       lfsr_val   <= 32'd0;
     end else begin
       pc      <= n_pc;
-      page    <= page_wr ? bus_wdata[7] : n_page;
-      jpage   <= page_wr ? bus_wdata[7] : n_jpage;
+      page    <= n_page;
+      jpage   <= n_jpage;
       ir      <= n_ir;
       x       <= n_x;
       y       <= n_y;
@@ -867,7 +883,7 @@ module pe_engine #(
       3'd2: dbg = y;
       3'd3: dbg = isr;
       3'd4: dbg = osr;
-      3'd5: dbg = {3'b000, osr_cnt, 3'b000, isr_cnt};
+      3'd5: dbg = {page, osr_cnt, jpage, isr_cnt};
       3'd6: dbg = instr;
       default: dbg = div_cnt;
     endcase
@@ -887,7 +903,7 @@ module pe_engine #(
         5'h07: bus_rdata = {1'b0, set_cnt_r, set_base};
         5'h08: bus_rdata = {jmp_pin, in_base};
         5'h09: bus_rdata = {side_dirs, side_opt, side_cnt, side_base};
-        5'h0A: bus_rdata = {page, jmp_pat, jmp_base};
+        5'h0A: bus_rdata = {1'b0, jmp_pat, jmp_base};
         5'h0B: bus_rdata = {3'b000, status_sel, status_n};
         5'h0C: bus_rdata = {3'b000, lfsr_right, lfsr_mode, lfsr_feed};
         5'h0D: bus_rdata = {1'b0, cap_flag_en, cap_edge, cap_pin};
@@ -918,7 +934,6 @@ module pe_engine #(
 `ifdef FORMAL
   assign f_pc = pc;
   assign f_page = page;
-  assign f_page_wr = page_wr;
   assign f_ir = ir;
   assign f_cur = cur;
   assign f_exec_valid = exec_valid;

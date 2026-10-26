@@ -17,13 +17,13 @@ Its instruction set and hardware primitives provide general pin and timing opera
 | Constraint | Current configuration |
 | --- | --- |
 | Process and flow | IHP 130nm CMOS5L through Tiny Tapeout |
-| Allocation | 6x4 tiles in `info.yaml`; planned competition maximum is 8x4 once its template is available |
+| Allocation | 8x4 tiles in `info.yaml`; CMOS5L template confirmed in tt-support-tools `d66cf17` |
 | Interface | Standard Tiny Tapeout pins with an SPI-style Host port |
 | Clock target | Project target of 50 MHz; competition has no fixed target and all-corner setup closure remains open |
 | Submission deadline | January 18, 2027, confirmed by the organizer email |
 
 [The organizer update and FAQ](docs/competition-update.md), recorded October 13, 2026, covers allocation, SRAM, I/O, reset and reload, judging, and submission requirements.
-Keep designing to 6x4 until the 8x4 template is confirmed available.
+The CMOS5L 8x4 template is present in tt-support-tools `d66cf17` (September 21, 2026); the current working design uses it for additional programmable capacity.
 Flexibility is the main judging criterion, and the submission write-up must describe AI use.
 Recheck the current organizer rules and submission form before submission.
 RP2040 PIO and TI PRU are architectural inspiration.
@@ -36,7 +36,8 @@ The implemented architecture has two engines, shared writable instruction memory
 
 Verification includes top-level cocotb tests with independent protocol peers, random cycle-by-cycle comparisons against a specification-based Python model, and formal checks for selected properties.
 Recorded CMOS5L builds passed hardening, precheck, and functional gate-level simulation and met 50 MHz at the typical corner.
-The latest measured RTL (`17995b3`) has +4.05 ns typical-corner setup slack and -4.14 ns slow-corner setup slack, so all-corner closure remains open.
+The previously published measured RTL (`17995b3`) has +4.05 ns typical-corner setup slack and -4.14 ns slow-corner setup slack, so all-corner closure remains open.
+A local 8x4 build of the earlier four-page flip-flop source closed 50 MHz at every corner (+0.13 ns slow-corner setup, +0.11 ns hold) with clean DRC and LVS; the current eight-page latch source is still being measured.
 Use [docs/area-log.md](docs/area-log.md) to identify which source commit each physical result covers.
 
 Physical CI runs on published releases and prereleases.

@@ -16,12 +16,13 @@ Terms follow `CONTEXT.md`: an **Engine** executes a **Program** that the **Host*
 | Block | Count | Purpose |
 | --- | --- | --- |
 | Host port | 1 | SPI-style target port that the Host uses to reach every register |
-| Instruction memory | 1, shared | 128 instructions of 16 bits in two pages of 64, written by the Host, read by both engines every cycle |
+| Instruction memory | 1, shared | 512 instructions of 16 bits in eight pages of 64, written by the Host, read by both engines every cycle |
 | Engine | 2 | Executes instructions, with shift registers, scratch registers, buffers, side-set and delay |
 | Buffers | 1 per engine | 8 entries of 16 bits each, usable as transmit queue, receive queue or RAM (G5) |
 | Checksum shift register (G1) | 1 per engine | 32-bit programmable LFSR for CRCs, parity, scramblers and test patterns |
 | Edge capture (G3) | 1 per engine | Latches the global 32-bit cycle counter on a chosen pin edge |
 | Bit state machine (G2) | 1, shared | 64-entry table that steps a 16-state machine on two input bits |
+| Clock recovery (G7) | 1, shared | Programmable phase tracker, edge window, sampling phase and missing-edge deadline; strobes G2 |
 | Pin block | 1 | Input synchronizers, glitch filters, falling-edge sampling (G6) and output drive modes |
 | Coordination flags | 8, shared | Set, cleared and waited on by engines, the capture units and the Host |
 
@@ -63,7 +64,7 @@ While `rst_n` is low and after it rises, until the Host configures otherwise:
 
 Lines that must idle high, such as UART TX, I2C or USB, belong on `uio` pins, where an external pull-up sets the idle level before configuration.
 
-Instruction memory and the bit state machine table are not reset; their contents are undefined until written.
+Reset clears instruction memory, the bit state machine table and every FIFO and RAM entry to 0.
 Engines must not be enabled before the Host loads a program.
 
 ## Host port
@@ -132,7 +133,7 @@ Multi-byte registers are little-endian.
 | Address | Name | Access | Description |
 | --- | --- | --- | --- |
 | 0x00 | `ID` | R | 0x50 |
-| 0x01 | `VERSION` | R | 0x03: instruction memory pages, `set page` and emission into either engine; 0x02 added timed waits and count reads |
+| 0x01 | `VERSION` | R | 0x05: eight memory pages (`IMEM_ADDR_H`, 3-bit `set page`), the falling-edge output phase (`NEGOUT`). Version 0x04 added four pages, clock recovery and G2 strobe mode and reserved EXECCFG bit 7; 0x03 added two pages and emission into either engine; 0x02 added timed waits and count reads |
 | 0x02 | `CTRL` | RW | Bit 0 enables engine 0, bit 1 enables engine 1 |
 | 0x03 | `CMD` | W | Write 1 to pulse: bit 0 restarts engine 0, bit 1 restarts engine 1, bit 2 steps engine 0, bit 3 steps engine 1, bit 4 clears engine 0 buffers, bit 5 clears engine 1 buffers, bit 6 resets both clock dividers |
 | 0x04 | `FLAGS` | RW | Read the 8 coordination flags; write 1 to clear |
@@ -141,8 +142,8 @@ Multi-byte registers are little-endian.
 | 0x07 | `STICKY` | RW | Error flags; write 1 to clear (see below) |
 | 0x08 | `STICKY_MASK` | RW | Sticky bits that assert `HIRQ` |
 | 0x09 | `HOSTCFG` | RW | Bit 0 `QUAD` |
-| 0x0A | `IMEM_ADDR` | RW | Instruction memory write address, 7 bits (bit 6 is the page) |
-| 0x0B | `IMEM_DATA` | W port | Writes one instruction at `IMEM_ADDR`, then increments `IMEM_ADDR` modulo 128 |
+| 0x0A | `IMEM_ADDR` | RW | Instruction memory write address bits 7:0; with `IMEM_ADDR_H` bit 0 as bit 8, bits 8:6 select the page |
+| 0x0B | `IMEM_DATA` | W port | Writes one instruction at the 9-bit write address, then increments it modulo 512 |
 | 0x0C | `G2_ADDR` | RW | Bit state machine table write address, 6 bits |
 | 0x0D | `G2_DATA` | W | Writes one table entry at `G2_ADDR`, then increments `G2_ADDR` modulo 64 (8-bit, not a port) |
 | 0x0E | `G2_CTRL` | RW | See bit state machine |
@@ -154,7 +155,16 @@ Multi-byte registers are little-endian.
 | 0x14 | `PINS_L` | R | Pin space bits 7:0 |
 | 0x15 | `PINS_H` | R | Pin space bits 15:8 |
 | 0x16-0x19 | `COUNTER` | R | Global cycle counter; reading 0x16 latches bits 31:8 for the following reads |
+| 0x1A | `NEGOUT` | RW | Bits 3:0: pin (0-12) whose output value is sampled on the falling edge for the [output phase](#output-path); 13-15 sample 0 |
+| 0x1B-0x1C | `NEGMASK` | RW | 13 bits, little-endian: pins whose output value is XORed with that sample |
+| 0x1D | `IMEM_ADDR_H` | RW | Bit 0: bit 8 of the instruction memory write address |
 | 0x20-0x2C | `PINCFG0`-`PINCFG12` | RW | Per-pin configuration |
+| 0x30 | `CR_CTRL` | RW | Bit 0 enable, bit 1 double sampling, bits 3:2 lock edge (0 rising, 1 falling, 2/3 either), bits 7:4 input pin |
+| 0x31 | `CR_GAIN` | RW | Bits 3:0 final correction shift K; bits 7:4 missing-edge budget (15 never loses lock) |
+| 0x32-0x33 | `CR_INC` | RW | Little-endian phase increment per sample, in 1/65536 bit |
+| 0x34 | `CR_WIN` | RW | Accepted tracking-edge window, in 1/256 bit on either side of phase zero |
+| 0x35 | `CR_SAMPLE` | RW | Strobe phase, in 1/256 bit |
+| 0x36 | `CR_STATUS` | R | Bit 0 locked, bit 1 last recovered data, bits 7:4 consecutive strobes without an accepted edge |
 
 Writes to `IMEM_DATA` (0x0B) do not auto-increment the bus address; `G2_DATA` (0x0D) does not either.
 
@@ -202,7 +212,7 @@ Offsets are relative to the block base.
 | 0x07 | `SETPIN` | RW | Bits 3:0 base, bits 6:4 count (0-5; 6 and 7 act as 5) |
 | 0x08 | `INPIN` | RW | Bits 3:0 `in` base, bits 7:4 `jmp pin` index |
 | 0x09 | `SIDEPIN` | RW | Bits 3:0 base, bits 5:4 count (0-3), bit 6 optional, bit 7 side-set drives directions |
-| 0x0A | `EXECCFG` | RW | Bits 5:0 jump base (G8), bit 6 `jmp pin` tests the pin pattern instead (G4), bit 7 instruction memory page: a write sets the page the engine fetches from and the page of its next jump, a read returns the fetch page |
+| 0x0A | `EXECCFG` | RW | Bits 5:0 jump base (G8), bit 6 `jmp pin` tests the pin pattern instead (G4); bit 7 reserved, reads 0 and does not select a page |
 | 0x0B | `STATUSCFG` | RW | Bits 3:0 level `N`, bit 4 selects the receive queue (1) or transmit queue (0) |
 | 0x0C | `LFSRCFG` | RW | Bits 1:0 feed, bits 3:2 mode, bit 4 shifts right |
 | 0x0D | `CAPCFG` | RW | Bits 3:0 pin, bits 5:4 edge (0 off, 1 rising, 2 falling, 3 both), bit 6 sets a flag |
@@ -223,7 +233,7 @@ Offsets are relative to the block base.
 | 2 | Y |
 | 3 | ISR |
 | 4 | OSR |
-| 5 | Bits 4:0 ISR count, bits 12:8 OSR count |
+| 5 | Bits 4:0 ISR count, bits 7:5 jump page, bits 12:8 OSR count, bits 15:13 fetch page |
 | 6 | The instruction the engine will execute next |
 | 7 | Clock divider counter |
 
@@ -252,6 +262,11 @@ Pins 0-9 pass through: synchronizer (2 flops, unless bypassed), then the glitch 
 Engine pin registers update on the clock edge that ends the executing cycle.
 The pad changes in the following cycle, with no extra register stage.
 Bit state machine outputs follow the same rule.
+
+**Falling-edge output phase:** the owner value of pin `NEGOUT` (after its invert bit) is also sampled on the falling edge of `clk`, and every pin in `NEGMASK` drives its own value XORed with that sample.
+So a change of the `NEGOUT` pin reaches those pads half a cycle after the rising edge, which gives a program half-cycle output timing, for example Manchester mid-bit transitions at 10 Mbit/s from a 50 MHz clock.
+The sample resets to 0 and changes only on falling edges; pins 10-12 in the pin space read it as retimed to the rising edge, so readback stays a full-cycle path.
+The half-cycle step depends on the duty cycle of `clk`.
 
 ## Engines
 
@@ -431,7 +446,7 @@ A program uses `isrcnt` to learn how many bits of a partial word the ISR holds b
 Destinations: 0 `pins` (`SETPIN` range), 1 `x`, 2 `y`, 3 `page`, 4 `pindirs`; others do nothing.
 The 5-bit value is zero-extended.
 
-`set page, v` selects page `v` bit 0 for the next jump the engine takes; bits 4:1 are reserved and must be 0.
+`set page, v` selects page `v` bits 2:0 for the next jump the engine takes; bits 4:3 are reserved and must be 0.
 It takes one cycle and does not change the page the engine fetches from: the instructions after it run in the current page until a jump is taken (see [instruction memory](#instruction-memory)).
 
 ## Buffers (G5)
@@ -504,11 +519,11 @@ The index is `{state[3:0], in1, in0}`.
 | --- | --- |
 | 0 | Enable |
 | 1 | Owner engine |
-| 3:2 | Step mode: 0 every cycle, 1 on each tick of the owner's clock divider (not Host steps or exec slot ticks), 2 when the feed is full, 3 never |
+| 3:2 | Step mode: 0 every cycle, 1 on each tick of the owner's clock divider (not Host steps or exec slot ticks), 2 when the feed is full, 3 on a clock-recovery strobe |
 | 4 | Emit into an engine's ISR |
 | 5 | Emit into the engine that does not own the bit state machine, instead of the owner |
 
-Input sources (`G2_IN0`, `G2_IN1`): 0-15 the pin space, 16 the feed bit, 17 feed full, others 0.
+Input sources (`G2_IN0`, `G2_IN1`): 0-15 the pin space, 16 the feed bit, 17 feed full, 18 recovered data, 19 clock-recovery lock, 20 clock-recovery strobe, others 0.
 
 On each step, state and outputs load from the entry.
 Outputs are registered, so they reach a pin one cycle after the step.
@@ -526,6 +541,44 @@ If autopush finds the receive queue full, the word is dropped, the ISR clears, a
 In a cycle with an emission, a receiving-engine instruction that would modify the ISR stalls for that cycle: any `in`, `push`, `mov isr` or `out isr`.
 If checksum feed bit 1 is set, so that the emission steps the checksum register, a 1-bit `in`, a 1-bit `out` that steps it, and `out lfsr` stall as well.
 
+## Clock recovery (G7)
+
+This shared phase tracker recovers strobes from edges without executing engine instructions.
+It runs every chip cycle, independently of engine enable and clock dividers.
+All configuration and state reset to zero, with no strobes and no lock.
+Disable `CR_CTRL` before changing its settings; while disabled the phase, edge count, missing-edge count, lock and data clear on each cycle, and the previous sample follows the input.
+The first cycle after enabling can acquire a configured edge; register writes take effect on the following cycle.
+
+The phase is a wrapping 16-bit fraction of a bit. Each rising-edge cycle processes the selected pin at phase P.
+With double sampling, it also processes pin 15 at phase P + INC, then advances by 2 INC; otherwise it advances by INC.
+For two chronologically spaced samples of the same pad, use its default synchronized input path and set `NEGSEL` to that pad: pin 15 follows the rising-path sample by half a cycle.
+Bypass or filtering changes that relationship and requires a separately verified profile.
+For nominal bit frequency b, set INC approximately to 65536 b / (f_clk times the samples per cycle).
+Profiles must keep the per-cycle phase advance below half a bit so crossings cannot be skipped.
+
+A transition's estimated phase is midway between the differing samples.
+Its signed phase error E is the distance from phase zero, in [-32768, 32767].
+While unlocked, the selected edge polarity acquires lock and subtracts the entire E from the next phase.
+The locking edge is then the selected edge for the first strobe, with error zero.
+While locked, an edge is in the window if -256 WIN <= E < 256 WIN; WIN = 0 admits none. Acquisition does not use WIN.
+Between two strobes the unit keeps one selected edge: the in-window edge nearest phase zero, the earlier of two equally near ones.
+An edge before the strobed sample belongs to that strobe; a later one, including the second sample of the strobing cycle, belongs to the next.
+The phase is corrected only at a strobe with a selected edge, and only by that edge: the n-th such strobe since locking subtracts the signed arithmetic shift E >> min(K, floor(log2(n))), with n saturating at 65535.
+Thus the first strobes average the edges quickly and tracking settles to gain 2^-K, while the other edges of a bit, such as a boundary transition or a glitch, do not move the phase.
+An edge selected after a strobe in the same cycle has its error adjusted by that strobe's correction.
+
+The strobe selects the sample nearest `CR_SAMPLE` by rounding with INC/2.
+It fires on the first sample outside the preceding half-bit window after observing a sample inside it; phase corrections therefore do not retrigger the same crossing.
+Acquisition arms this crossing detector. Strobe, data and lock are registered; G2 sees them the following cycle, and its normal emission latency then applies.
+The strobed data is the level after the selected edge, or the strobed sample if no edge is selected, so a transition's direction decides the bit even when the strobed sample lands on the wrong side of a displaced boundary transition.
+A strobe with a selected edge resets the missing-edge count; otherwise the strobe increments it, saturating at 15.
+With a budget L, lock is lost on the (L+1)-th consecutive strobe without a selected edge, except L = 15 holds lock indefinitely.
+The lock-loss strobe is still emitted, with lock low, so G2 can close a record without emitting its data.
+
+The 50 MHz Ethernet profile samples twice per cycle (double sampling of the receive pad through `NEGSEL`), so 10 samples per 100 ns bit on a 10 ns grid.
+It uses INC = 6554, WIN = 112 (+/- 0.44 bit), sample phase 112 (0.44 bit after the mid-bit transition), K = 6 and L = 2, which permits up to two trailing bits after carrier loss.
+Its margin at the 802.3 receive jitter limit, every transition displaced by +/- 13.5 ns at +/- 200 ppm, is in [protocol limits](protocols.md#ethernet-receive-margin).
+
 ## Coordination flags
 
 There are 8 flags shared by both engines, the capture units and the Host.
@@ -533,18 +586,18 @@ Within one cycle, all sets and clears combine, and a set wins over a clear.
 
 ## Instruction memory
 
-128 entries of 16 bits in two pages of 64, written only by the Host.
+512 entries of 16 bits in eight pages of 64, written only by the Host.
 Each engine fetches from one page at a time: PC, jump targets, wrap bounds and the jump base are addresses within a page.
 Sequential execution and the wrap stay in the current page.
-The wrap therefore applies at `WRAP_TOP` in whichever page the engine runs, so a program spanning both pages must not fall through the instruction at that address in the other page; the assembler rejects one that would.
+The wrap therefore applies at `WRAP_TOP` in whichever page the engine runs, so a program spanning pages must not fall through the instruction at that address in another page; the assembler rejects one that would.
 Each engine also holds a jump page, which `set page` writes.
 Every jump the engine takes (`jmp`, `out pc`, `mov pc`, and a forced `jmp`) goes to its target in the jump page, which becomes the fetch page.
-So after any taken jump the two pages are equal, and a far jump is `set page, p` followed by a jump.
-A program can therefore span both pages, for example a protocol whose code exceeds 64 words.
+So after any taken jump the fetch and jump pages are equal, and a far jump is `set page, p` followed by a jump.
+A program can therefore span all eight pages, for example a protocol whose code exceeds 64 words.
 Both engines may use the same page.
 Reset selects page 0 for both.
-The Host addresses all 128 entries through `IMEM_ADDR`.
-A Host write to `EXECCFG` sets both pages; it must then set the PC with a forced `jmp` before the engine runs, because the instruction already fetched at PC came from the old page.
+The Host addresses all 512 entries through `IMEM_ADDR_H` and `IMEM_ADDR`.
+To start an engine in another page, disable it, force `set page, p`, then force a `jmp` to the entry address. EXECCFG does not change either page since version 4.
 A restart (`CMD` bits 0-1) does not change either page.
 An instruction issues with the memory contents at the start of its cycle.
 A write takes effect at the end of the cycle that carries it, so every instruction issued after that cycle sees it, also on a running engine.
@@ -561,11 +614,16 @@ This is invisible at the pins: every cycle count in this document is the same as
 
 ### Storage implementation (H2)
 
-Instruction memory and the bit state machine table share one storage module.
-The default build uses flip-flops.
-Defining `PE_LATCH_STORE` builds the same module from latches, which use about 60% of the area.
-The latch build is not yet verified on IHP CMOS5L and is not selected for tapeout.
-In the latch build, a write becomes visible during the second half of the cycle after it is issued.
+Instruction memory and the bit state machine table share one storage module, `src/pe_store.v`.
+The tapeout build stores each bit in a latch with reset, the library cell `sg13cmos5l_dlhrq_1` instantiated explicitly, so synthesis infers no latch.
+A latch with its row enable costs about 40% of the area of a flip-flop with its write multiplexer, which is what makes eight pages fit in the tile.
+The write data and address are registered; in the following cycle the addressed row is transparent while `clk` is low, so the word settles before the rising edge that ends that cycle.
+Fetch therefore sees a write in the same cycles as in a flip-flop build, and the write-port comparison described above covers the cycle of the write itself.
+Each row has its own clock-gating cell, `sg13cmos5l_lgcp_1` instantiated explicitly, clocked by the inverted clock and enabled by the registered decode.
+The cell latches the decode while `clk` is high, so a decode that settles after the rising edge cannot open a row, and its output is high only while `clk` is low.
+Because the clock enters through these cells alone, synthesis cannot merge it into the shared address decode; when it did, the clock reached 3,594 nets, some cells carried it on two inputs, and clock-tree synthesis disconnected three row enables (build 7 in the [area log](area-log.md)).
+The path from the latch through the read multiplexer to `ir` has half a cycle, which routed timing must show.
+Defining `PE_FLOP_STORE` (`make FLOP=yes` in `test/`) builds the same module from flip-flops written at the end of the cycle that carries the write; both builds pass the same tests.
 
 ## Limits
 

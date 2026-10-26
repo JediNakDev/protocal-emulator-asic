@@ -113,36 +113,14 @@ def usb_nrzi_dpll():
     return build(rule)
 
 
-def manchester_receiver():
-    """Manchester decoder stepping every cycle on two samples per cycle:
-    in0 = rising-edge sample, in1 = falling-edge sample (pin 15, NEGSEL set
-    to the same pin). Designed for 4 cycles per bit (10 Mbit/s at 40 MHz).
-    After a mid-bit transition, steps 1 and 2 are ignored (they hold the
-    possible bit-boundary transition), step 3 accepts only a transition
-    between its two samples, and steps 4 and 5 accept any transition.
-    Each mid-bit transition emits the new level (IEEE 802.3: low-to-high is 1).
-    Without a transition by step 5 the decoder goes idle and raises out1;
-    from idle it locks on the next rising transition (a preamble starts with
-    a rising mid-bit transition). out0 follows the line.
-    States: 1-3 the steps after a transition, 4+L and 6+L steps 4 and 5
-    with the line at L, 8+L idle with the line at L."""
+def recovered_bits():
+    """Bits from clock recovery (G7), stepping on its strobes (step mode 3):
+    in0 = recovered data (source 18), in1 = locked (source 19). While locked,
+    each strobe emits the data bit and holds out1 low; the strobe that loses
+    lock emits nothing and raises out1, which also marks the idle line
+    before the first lock when G2_STATE starts with out1 set. One state."""
     def rule(state, in0, in1):
-        a, b = in0, in1
-        if state in (1, 2):
-            return Step(next=state + 1, out0=b)
-        if state == 3:
-            if a != b:
-                return Step(next=1, out0=b, emit=True)
-            return Step(next=4 + b, out0=b)
-        if state in (4, 5, 6, 7):
-            level = state & 1
-            if level != a or a != b:
-                return Step(next=1, out0=b, emit=True)
-            if state < 6:
-                return Step(next=6 + b, out0=b)
-            return Step(next=8 + b, out0=b, out1=1)
-        level = state & 1 if state in (8, 9) else b
-        if (level == 0 and (a or b)) or (a == 0 and b == 1):
-            return Step(next=1, out0=1, emit=True)
-        return Step(next=8 + b, out0=b, out1=1)
+        if in1:
+            return Step(next=0, out0=in0, emit=True)
+        return Step(next=0, out1=1)
     return build(rule)

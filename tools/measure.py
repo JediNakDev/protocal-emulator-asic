@@ -24,7 +24,7 @@ def sha256(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--liberty", type=Path, help="map both storage variants with Yosys")
+    parser.add_argument("--liberty", type=Path, help="map both storage variants with Yosys (a CMOS5L liberty)")
     parser.add_argument("--output", type=Path, default=ROOT / "output/measure")
     args = parser.parse_args()
     # Use the physical source manifest rather than a separate RTL file list.
@@ -49,11 +49,13 @@ def main():
         report["liberty"] = str(liberty)
         report["yosys_version"] = subprocess.check_output(["yosys", "-V"], text=True).strip()
         report["synthesis"] = {}
-        for variant, define in (("flip_flop", ""), ("latch", "-DPE_LATCH_STORE")):
+        # The latch store instantiates sg13cmos5l_dlhrq_1 (read_verilog
+        # defines SYNTHESIS), so the latch variant needs the CMOS5L library.
+        for variant, define in (("flip_flop", "-DPE_FLOP_STORE"), ("latch", "")):
             quoted = " ".join(json.dumps(str(p)) for p in sources)
             lib = json.dumps(str(liberty))
             script = (
-                f"read_verilog {define} {quoted}; "
+                f"read_liberty -lib {lib}; read_verilog {define} {quoted}; "
                 "synth -flatten -top tt_um_jedinakdev_protocol_emulator; "
                 f"dfflibmap -liberty {lib}; abc -liberty {lib}; opt_clean; stat -liberty {lib}"
             )

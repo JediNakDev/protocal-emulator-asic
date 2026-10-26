@@ -1,21 +1,22 @@
 ## How it works
 
 This chip implements digital protocols in software.
-Two engines run programs from a shared 128-instruction memory in two 64-instruction pages that the Host loads after power-up, so new protocols need no new silicon.
+Two engines run programs from a shared 512-instruction memory in eight 64-instruction pages that the Host loads after power-up, so new protocols need no new silicon.
 The full behavior is defined in [the specification](spec.md).
 
 Each engine reads and drives 13 protocol pins with cycle-exact timing.
 It has PIO-style instructions (`jmp`, `wait`, `in`, `out`, `push`, `pull`, `irq`, `mov`, `set`), side-set and delay, shift registers with automatic refill and drain, and an integer clock divider.
 Each engine owns 8 words of buffering that can act as transmit queue, receive queue or RAM.
-Instruction set version 3 (register `VERSION`) has timed waits, which give up after a set number of checks, and shift-count reads; programs over 64 instructions cross pages with `set page`, and the bit state machine can emit its decoded bits into the engine that does not own it.
-Programs use these general operations for bounded USB replies, CAN resynchronization and acknowledgement, and exact message boundaries; [the design review](design-review.md) tracks the remaining mandatory protocol gaps.
+Instruction set version 5 (register `VERSION`) keeps timed waits and shift-count reads, expands memory to eight pages selected by a 3-bit `set page`, and adds a falling-edge output phase for half-cycle transmit timing; version 4 added the programmable clock-recovery unit that strobes the bit state machine. The bit state machine can emit into either engine. EXECCFG bit 7 is reserved; loaders must force `set page` before the entry jump.
+Programs use these general operations for bounded USB replies, a CAN node with full error confinement, Ethernet clock recovery at the 802.3 jitter limit, and exact message boundaries; [the design review](design-review.md) tracks the remaining mandatory protocol gaps.
 
 General building blocks extend what the programs can do, without any protocol-specific hardware:
 
 - A programmable 32-bit checksum shift register per engine computes any CRC up to 32 bits, parity, scramblers and test patterns as bits pass through.
 - A shared bit state machine runs a 16-state, 64-entry table at up to one step per cycle, for line codes such as Manchester or NRZI, in either direction.
+- A shared programmable clock-recovery unit tracks transition phase and strobes the bit state machine at a selected sample point.
 - A global 32-bit cycle counter with per-engine edge capture timestamps pin edges.
-- Per-pin glitch filters, synchronizer bypass and falling-edge sampling refine the input timing.
+- Per-pin glitch filters, synchronizer bypass and falling-edge sampling refine the input timing, and a falling-edge output phase moves selected output transitions by half a cycle.
 - Pattern waits and indexed jumps help programs react quickly to multi-pin conditions and decode symbols.
 
 Together these make the chip a cycle-exact recorder and signal generator for protocols it has no program for.
@@ -36,7 +37,8 @@ Selected formal checks cover fetch consistency, buffer occupancy, and safe reset
 
 Publishing a release or prerelease runs CMOS5L hardening, precheck, functional gate-level tests, and a separate global-route timing estimate.
 Recorded routed builds meet 50 MHz at the typical corner but fail setup timing at the slow corner.
-The latest measured RTL (`17995b3`) has +4.05 ns typical-corner setup slack and -4.14 ns slow-corner setup slack; [the area log](area-log.md) records the source and reports for each measurement.
+The previously published measured RTL (`17995b3`) has +4.05 ns typical-corner setup slack and -4.14 ns slow-corner setup slack; a local build of the four-page design met setup and hold at every corner, and the eight-page latch design is still being measured. [The area log](area-log.md) records the source and reports for each measurement.
+The current 8x4 working source measures +5.48 ns typical and -3.16 ns slow setup slack at 50 MHz after detailed routing; final physical checks remain open.
 
 On the demo board, the RP2040 acts as Host:
 

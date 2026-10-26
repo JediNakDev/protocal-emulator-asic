@@ -6,12 +6,18 @@
 `default_nettype none
 
 // Write-only storage array with every word exposed, so callers build their
-// own read multiplexers. Contents are not reset.
+// own read multiplexers. Reset clears every word to 0.
 //
-// Default: flip-flops. With PE_LATCH_STORE defined: one latch per bit. The
-// write is registered, then the addressed row is transparent while clk is low
-// in the following cycle. The latch build is unverified on IHP CMOS5L (H2 in
-// docs/spec.md) and is not used for tapeout.
+// Default (tapeout): one latch with reset per bit, about 40% of the area of
+// a flip-flop with its write-enable multiplexer on IHP CMOS5L (H2 in
+// docs/spec.md). The write is registered; in the following cycle the
+// addressed row is transparent while clk is low, so the word is stable
+// before the next rising edge. Synthesis instantiates the library latch
+// sg13cmos5l_dlhrq_1 and the clock gate sg13cmos5l_lgcp_1 directly, so no
+// latch is inferred; simulation uses equivalent behavioral models.
+//
+// With PE_FLOP_STORE defined: one flip-flop per bit, written at the end of
+// the cycle that carries the write.
 module pe_store #(
     parameter integer W  = 16,
     parameter integer D  = 64,
@@ -25,7 +31,19 @@ module pe_store #(
     output wire [W*D-1:0] q
 );
 
-`ifdef PE_LATCH_STORE
+`ifdef PE_FLOP_STORE
+  genvar i;
+  generate
+    for (i = 0; i < D; i = i + 1) begin : g_row
+      reg [W-1:0] row;
+      always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) row <= {W{1'b0}};
+        else if (we && waddr == i[AW-1:0]) row <= wdata;
+      end
+      assign q[i*W +: W] = row;
+    end
+  endgenerate
+`else
   reg          we_q;
   reg [AW-1:0] wa_q;
   reg [W-1:0]  wd_q;
@@ -44,30 +62,46 @@ module pe_store #(
     end
   end
 
-  genvar i;
-  generate
-    for (i = 0; i < D; i = i + 1) begin : g_row
-      wire          gate = we_q & (wa_q == i[AW-1:0]) & ~clk;
-      reg  [W-1:0]  row;
-      /* verilator lint_off LATCH */
-      always @(*) begin
-        if (gate) row = wd_q;
-      end
-      /* verilator lint_on LATCH */
-      assign q[i*W +: W] = row;
-    end
-  endgenerate
-`else
-  wire _unused = rst_n;
+  wire clk_n = ~clk;
 
-  genvar i;
+  genvar i, b;
   generate
     for (i = 0; i < D; i = i + 1) begin : g_row
-      reg [W-1:0] row;
-      always @(posedge clk) begin
-        if (we && waddr == i[AW-1:0]) row <= wdata;
+      // One clock gate per row: high while clk is low in the cycle after a
+      // write to the row. The gate cell latches the row select while clk is
+      // high, so a decode that settles after the rising edge cannot open a
+      // row, and the clock reaches only the gate cells, never the shared
+      // address decode.
+      wire sel = we_q & (wa_q == i[AW-1:0]);
+      wire gate;
+`ifdef SYNTHESIS
+      sg13cmos5l_lgcp_1 u_gate (
+          .GCLK(gate),
+          .CLK (clk_n),
+          .GATE(sel)
+      );
+`else
+      assign gate = clk_n & sel;
+`endif
+      for (b = 0; b < W; b = b + 1) begin : g_bit
+`ifdef SYNTHESIS
+        sg13cmos5l_dlhrq_1 u_latch (
+            .Q      (q[i*W + b]),
+            .D      (wd_q[b]),
+            .GATE   (gate),
+            .RESET_B(rst_n)
+        );
+`else
+        reg bit_q;
+        /* verilator lint_off LATCH */
+        always @(*) begin
+          if (!rst_n) bit_q = 1'b0;
+          else if (gate) bit_q = wd_q[b];
+        end
+        /* verilator lint_on LATCH */
+        assign q[i*W + b] = bit_q;
+`endif
       end
-      assign q[i*W +: W] = row;
     end
   endgenerate
 `endif

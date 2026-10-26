@@ -41,7 +41,6 @@ module pe_fifo (
     output wire        rx_full
 );
 
-  integer i;
 
   // ------------------------------------------------------------ mode decode
   reg [3:0] tx_depth, rx_depth;
@@ -123,22 +122,28 @@ module pe_fifo (
   end
 
   // ---------------------------------------------------------------- storage
-  reg [15:0] mem [0:7];
+  wire [127:0] mem;   // entry n in bits 16n+15:16n
 
-  // Engine writes win over Host writes to the same entry.
-  always @(posedge clk) begin
-    for (i = 0; i < 8; i = i + 1) begin
-      if ((rx_push && rx_wa == i[2:0]) || (e_ram_we && ram_mask[i] && e_ram_idx == i[2:0])) begin
-        mem[i] <= (rx_push && rx_wa == i[2:0]) ? e_rx_data : e_ram_wdata;
-      end else if ((tx_push && tx_wa == i[2:0]) || (h_ram_we && ram_mask[i] && h_ram_idx == i[2:0])) begin
-        mem[i] <= (tx_push && tx_wa == i[2:0]) ? h_tx_data : h_ram_wdata;
+  // Engine writes win over Host writes to the same entry. Reset clears every
+  // entry (see pe_store.v for why the storage is reset).
+  genvar g;
+  generate
+    for (g = 0; g < 8; g = g + 1) begin : g_entry
+      wire e_we = (rx_push && rx_wa == g[2:0]) || (e_ram_we && ram_mask[g] && e_ram_idx == g[2:0]);
+      wire h_we = (tx_push && tx_wa == g[2:0]) || (h_ram_we && ram_mask[g] && h_ram_idx == g[2:0]);
+      reg  [15:0] q;
+      always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) q <= 16'h0000;
+        else if (e_we) q <= (rx_push && rx_wa == g[2:0]) ? e_rx_data : e_ram_wdata;
+        else if (h_we) q <= (tx_push && tx_wa == g[2:0]) ? h_tx_data : h_ram_wdata;
       end
+      assign mem[g*16 +: 16] = q;
     end
-  end
+  endgenerate
 
-  assign e_tx_data   = mem[tx_ra];
-  assign h_rx_data   = rx_empty ? 16'h0000 : mem[rx_ra];
-  assign e_ram_rdata = mem[e_ram_idx];
-  assign h_ram_rdata = mem[h_ram_idx];
+  assign e_tx_data   = mem[tx_ra*16 +: 16];
+  assign h_rx_data   = rx_empty ? 16'h0000 : mem[rx_ra*16 +: 16];
+  assign e_ram_rdata = mem[e_ram_idx*16 +: 16];
+  assign h_ram_rdata = mem[h_ram_idx*16 +: 16];
 
 endmodule

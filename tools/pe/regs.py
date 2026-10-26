@@ -21,14 +21,23 @@ G2_IN0 = 0x0F
 G2_IN1 = 0x10
 G2_STATE = 0x11
 NEGSEL = 0x12
+NEGOUT = 0x1A       # pin sampled on the falling edge for the output phase
+NEGMASK = 0x1B      # 0x1B-0x1C: pins XORed with that sample
+IMEM_ADDR_H = 0x1D  # bit 0: instruction memory write address bit 8
 DBG_SEL = 0x13
 PINS_L = 0x14
 PINS_H = 0x15
 COUNTER = 0x16
 PINCFG = 0x20  # PINCFG0..PINCFG12 at 0x20..0x2C
+CR_CTRL = 0x30
+CR_GAIN = 0x31
+CR_INC = 0x32   # 0x32-0x33
+CR_WIN = 0x34
+CR_SAMPLE = 0x35
+CR_STATUS = 0x36
 
 ID_VALUE = 0x50
-VERSION_VALUE = 0x03
+VERSION_VALUE = 0x05
 
 # CMD bits
 CMD_RESTART0 = 1 << 0
@@ -61,7 +70,6 @@ SETPIN = 0x07
 INPIN = 0x08
 SIDEPIN = 0x09
 EXECCFG = 0x0A
-EXECCFG_PAGE1 = 1 << 7   # fetch from instruction memory 64-127
 STATUSCFG = 0x0B
 LFSRCFG = 0x0C
 CAPCFG = 0x0D
@@ -127,10 +135,35 @@ G2_OWNER1 = 1 << 1
 G2_STEP_CYCLE = 0 << 2
 G2_STEP_TICK = 1 << 2
 G2_STEP_FEED = 2 << 2
+G2_STEP_STROBE = 3 << 2  # on each clock recovery strobe
 G2_EMIT = 1 << 4
 G2_EMIT_OTHER = 1 << 5   # emit into the engine that does not own G2
 G2_SRC_FEED_BIT = 16
 G2_SRC_FEED_FULL = 17
+G2_SRC_CR_DATA = 18
+G2_SRC_CR_LOCKED = 19
+G2_SRC_CR_STROBE = 20
+
+# CR_CTRL fields (clock recovery, G7)
+CR_ENABLE = 1 << 0
+CR_DOUBLE = 1 << 1       # samples the pin and pin 15 (NEGSEL = the pin)
+CR_LOCK_RISING = 0 << 2
+CR_LOCK_FALLING = 1 << 2
+CR_LOCK_EITHER = 2 << 2
+
+
+def cr_pin(pin):
+    return (pin & 15) << 4
+
+
+def cr_gain(shift, loss):
+    """CR_GAIN: final shift K (gain 2^-K) and strobes without an edge
+    before unlocking (15 never unlocks)."""
+    return (shift & 15) | (loss & 15) << 4
+
+
+CR_LOCKED = 1 << 0       # CR_STATUS
+CR_DATA = 1 << 1
 
 # Pin space
 PIN_G2_OUT0 = 13

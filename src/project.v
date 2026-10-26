@@ -59,7 +59,7 @@ module tt_um_jedinakdev_protocol_emulator (
   wire        div_sync;
   wire [2:0]  dbg_sel;
   wire        imem_we;
-  wire [6:0]  imem_addr;
+  wire [8:0]  imem_addr;
   wire [15:0] imem_wdata;
   wire [7:0]  flags;
   wire [7:0]  e0_fset, e0_fclr, e1_fset, e1_fclr;
@@ -101,7 +101,7 @@ module tt_um_jedinakdev_protocol_emulator (
   );
 
   // ----------------------------------------------------- instruction memory
-  wire [6:0]  fetch0, fetch1;
+  wire [8:0]  fetch0, fetch1;
   wire [15:0] instr0, instr1;
 
   pe_imem u_imem (
@@ -144,6 +144,22 @@ module tt_um_jedinakdev_protocol_emulator (
   );
 
   // --------------------------------------------------- bit state machine
+  wire       cr_strobe, cr_data, cr_locked;
+  wire [7:0] cr_rdata;
+
+  pe_cr u_cr (
+      .clk      (clk),
+      .rst_n    (rst),
+      .bus_addr (bus_addr),
+      .bus_wdata(bus_wdata),
+      .bus_we   (bus_we),
+      .bus_rdata(cr_rdata),
+      .pins_in  (pins_in),
+      .strobe   (cr_strobe),
+      .data     (cr_data),
+      .locked   (cr_locked)
+  );
+
   wire       g2_owner, g2_feed_full, g2_emit_bit;
   wire [1:0] g2_emit, div_tick, feed_wr, feed_bit;
   wire [7:0] g2_rdata;
@@ -159,6 +175,9 @@ module tt_um_jedinakdev_protocol_emulator (
       .tick     (div_tick),
       .feed_wr  (feed_wr),
       .feed_din (feed_bit),
+      .cr_strobe(cr_strobe),
+      .cr_data  (cr_data),
+      .cr_locked(cr_locked),
       .owner    (g2_owner),
       .feed_full(g2_feed_full),
       .out      (g2_out),
@@ -263,7 +282,7 @@ module tt_um_jedinakdev_protocol_emulator (
       .st_cap_ovr    (st_cap_ovr[1])
   );
 
-  assign bus_rdata = g_rdata | p_rdata | g2_rdata | e0_rdata | e1_rdata;
+  assign bus_rdata = g_rdata | p_rdata | g2_rdata | cr_rdata | e0_rdata | e1_rdata;
 
   assign uo_out = {uo_pins, hirq, hdo};
 

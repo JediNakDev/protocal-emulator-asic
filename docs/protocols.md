@@ -24,13 +24,14 @@ They do not cover pad timing, metastability, clock duty cycle or analog front en
 | PS/2 | Device (keyboard) | 34 | Open-drain, `status`, side-set clock, timed wait | 50 MHz | Scan codes to a host model; host command with request-to-send and acknowledge; an inhibited bus defers a frame, and an inhibit mid-frame aborts it with 0xFFFF reported |
 | PS/2 | Host | 42 | Open-drain, inhibit, `status`, timed wait | 50 MHz | Device frames; reset command acknowledged, 0xFA and 0xAA received; an absent device or one that stops clocking is reported with 0xFFFF and the lines released |
 | CAN 2.0A | Receiver (listen-only) | 21 | G2 destuffer, emit into ISR, timed wait, `isrcnt` | 50 MHz, 1 Mbit/s | Stuff-heavy and 8-byte frames; transmitter 1.5% fast and 1.5% slow, with the longest stretches between resynchronizing edges |
-| CAN 2.0A and 2.0B | Node: transmitter with arbitration, receiver that checks the CRC and acknowledges | 99 + 29 | G2 destuffer with bit-error check, emitting into the other engine; CRC (G1); field handlers by `mov pc`; `set page` across both pages; timed wait | 50 MHz, 1 Mbit/s | Standard, extended and remote frames from a node alone on the bus acknowledged by the chip, including frames with a stuff bit before the CRC delimiter, from a transmitter exact, 1.5% fast and 1.5% slow, also after ten bits without an edge, with the delimiters and end of frame left recessive; frames with a bad CRC not acknowledged; frames broken off by an error flag in the identifier, the data or in place of the stuff bit after the CRC not acknowledged, then the next frame acknowledged; frames sent by the chip and acknowledged by a node exact, 1.5% fast and 1.5% slow, and after a 24 µs Host pause; lost arbitration (the chip receives and acknowledges the winner, then the Host sends again) and won arbitration |
+| CAN 2.0A and 2.0B | Node with error confinement: transmitter with arbitration, receiver that checks the CRC and acknowledges | 472 + 39 | G2 destuffer with bit-error check, emitting into the other engine; CRC (G1); field handlers by `mov pc`; `set page` across eight pages; error counters in buffer RAM; timed wait | 50 MHz, 1 Mbit/s | Standard, extended and remote frames from a node alone on the bus acknowledged by the chip, including frames with a stuff bit before the CRC delimiter, from a transmitter exact, 1.5% fast and 1.5% slow, also after ten bits without an edge; frames sent by the chip and acknowledged by a node exact, 1.5% fast and 1.5% slow, and after a 14 µs Host pause; lost and won arbitration; ISO 11898-1 error confinement: active error flags for stuff, form, CRC, ACK and bit errors, passive error flags, REC and TEC by rules 1-12 including exceptions 3a and 3b (rules 4 and 5 with the bus held recessive under the chip's flag), error passive with suspend transmission, bus-off with recovery after 128 occurrences of 11 recessive bits, overload frames for intermission bit 1, end of frame bit 7 and error delimiter bit 8, a start of frame in intermission bit 3, transmit underrun (B14), and bus integration when started inside a frame |
 | Low-speed USB | Host | 37 + 5 | G2 clock-recovering NRZI receiver, pattern wait, timed wait, both engines | 48 MHz, 1.5 Mbit/s | GET_DESCRIPTOR (SETUP, DATA0, ACK, IN, DATA1, ACK) with device clocks exact, 1.5% fast and 1.5% slow; a missing reply ends at a 17-bit-time deadline and the next command runs; keep-alives at least every 1 ms while idle; a 50 ms bus reset on request |
-| 10BASE-T | Transmitter | 21 | G8 indexed jump, 2-pin side-set, `status` | 40 MHz, 10 Mbit/s | 89-byte frame, TD- complementary, TP_IDL, FCS; normal link pulses every 16.4 ms while idle |
-| 10BASE-T | Receiver | 7 | G2 Manchester decoder, falling-edge sampling (pin 15), emit into ISR, `isrcnt` | 40 MHz, 10 Mbit/s | Frames at five input phases and with +/- 8 ns jitter per transition; back-to-back frames at the minimum interframe gap and link pulses, separated exactly whenever the Host reads them |
+| 10BASE-T | Transmitter | 30 | G8 indexed jump, 3-pin side-set, falling-edge output phase (`NEGOUT`) for the half-cycle mid-bit transitions, `status` | 50 MHz, 10 Mbit/s | 89-byte frame, TD- complementary, every half bit 50 ns, TP_IDL, FCS; normal link pulses every 13.1 ms while idle |
+| 10BASE-T | Receiver | 7 | G7 clock recovery with double sampling (pin 15, falling edge), G2 strobe and emit into ISR, `isrcnt` | 50 MHz, 10 Mbit/s | The 802.3 receive jitter limit, +/-13.5 ns: uniform, composite (5.5 ns pattern-dependent) and every transition at an extreme, at several input phases and +/-200 ppm; a maximum-length frame; back-to-back frames at the minimum interframe gap and link pulses, separated exactly whenever the Host reads them; [margin](#ethernet-receive-margin) |
 | Any (waveform) | Capture and replay | 7 + 3 | Edge capture (G3), flag wait, autopush/autopull | 50 MHz, 1-cycle resolution | Random edges 4 to 100,003 cycles apart, captured and replayed with every interval exact; a UART byte edited on the Host and decoded by an independent receiver |
 
-The CAN node, `can_node` with `can_line`, uses all 128 instruction words (99 + 29), so no other program runs beside it; the largest single-page program, SWD, uses 48.
+The CAN node, `can_node` with `can_line`, occupies 511 of 512 instruction words (472 + 39), including 25 words of padding for its fixed field-handler addresses and page boundaries. It uses both engines, so no other program runs beside it; the largest single-page program, SWD, uses 48.
+The Host starts it with flags clear and buffer RAM entry 4 at 0 (the node at `bol`, the line at `start`); from then on the chip integrates into the bus and does all signaling, error handling and confinement itself.
 
 ## Record framing
 
@@ -98,7 +99,7 @@ Buffers absorb pauses in Host service; only the Host port's sustained rate keeps
 
 | Measure | Result |
 | --- | --- |
-| Sustained receive rate | One 16-bit word every 44 cycles without loss (18.2 Mbit/s at 50 MHz, 14.5 Mbit/s at 40 MHz); every 42 cycles loses words |
+| Sustained receive rate | One 16-bit word every 44 cycles without loss (18.2 Mbit/s at 50 MHz); every 42 cycles loses words |
 | Burst absorption | At one word per 100 cycles the 8-word queue absorbs a 400-cycle pause after each burst, not 600: its 8 words cover 800 cycles, and reading them takes about 330 |
 | Simultaneous TX and RX | `test_host.test_host_duplex_throughput` sustains one word each way every 128 cycles for 300 words with the 4+4 queue split (6.25 Mbit/s each way at 50 MHz); every 64 cycles overloads this schedule |
 
@@ -109,11 +110,30 @@ Requirements of the stream programs follow from these numbers:
 
 | Program | Stream | Load on the receive path | Pause the queue absorbs |
 | --- | --- | --- | --- |
-| `eth10_rx` at 40 MHz | 10 Mbit/s, 15 bits per word: a word every 60 cycles | 73% | About 150 cycles (4 µs) |
+| `eth10_rx` at 50 MHz | 10 Mbit/s, 15 bits per word: a word every 75 cycles | 59% | About 270 cycles (5 µs) |
 | `can_rx` or `can_line` at 50 MHz | 1 Mbit/s: a word every 750 cycles | 6% | About 5,700 cycles (115 µs) |
 | `usb_ls_rx` at 48 MHz | 1.5 Mbit/s: a word every 480 cycles | 9% | About 3,500 cycles (73 µs) |
 
-Ethernet in both directions at line rate, 10 Mbit/s each way, exceeds the Host port at 40 MHz; half duplex works.
+Ethernet in both directions at line rate, 10 Mbit/s each way, exceeds the demonstrated duplex rate of the Host port; half duplex works.
+
+## Ethernet receive margin
+
+IEEE 802.3 clause 14 requires a 10BASE-T receiver to accept transitions displaced by up to +/-13.5 ns, at up to 100 ppm frequency error at each end.
+`tools/eth_margin.py` drives the model of G7 (`pe.model.ClockRecovery`, which `test_random` checks against the RTL every cycle) with the `eth10_rx` settings at 50 MHz, a random input phase, and 0 or +/-200 ppm, and counts frames that do not arrive as one record with every bit:
+
+| Jitter on every transition | Frame | Frames | Lost |
+| --- | --- | --- | --- |
+| Uniform, +/-13.5 ns | 188 bytes | 3000 | 0 |
+| 5.5 ns pattern-dependent plus uniform +/-8 ns | 188 bytes | 3000 | 0 |
+| +13.5 or -13.5 ns at random | 72 bytes | 3000 | 0 |
+| +13.5 or -13.5 ns at random | 188 bytes | 1500 | 0 |
+| +13.5 or -13.5 ns at random | 1518 bytes | 150 | 0 |
+| +14 or -14 ns at random | 188 bytes | 1500 | 0 |
+| +14.5 or -14.5 ns at random | 188 bytes | 1500 | 5 |
+| +15 or -15 ns at random | 188 bytes | 1500 | 654 |
+
+The margin over the standard's worst case is therefore about 0.5 ns, set by the sampling: a 50 ns half bit, less both transitions' jitter and the 10 ns between samples.
+`test/test_eth.py` checks the 13.5 ns cases through the chip's pins.
 
 ## Limits found during verification
 
@@ -122,14 +142,12 @@ Each is unfinished work toward the [mandatory baseline](../AGENTS.md#non-negotia
 
 | Limit | Protocols | Cause | Effect |
 | --- | --- | --- | --- |
-| CAN error frames, error counters and bus-off are not implemented | CAN | The node uses all 128 instruction words | A stuff error, or a bit error while sending a dominant bit, ends the frame without an error frame: the node waits 12 bit times and returns to idle. A recessive bit overwritten after arbitration is taken as lost arbitration: the node continues as a receiver, and the Host tells the two apart from the bit position in `can_line`'s record. Form errors (a dominant CRC delimiter, acknowledgement delimiter or end of frame) are not checked, so such a frame is still acknowledged; the Host parser reports a dominant CRC delimiter as a broken frame. A frame with a bad CRC is not acknowledged, and no error frame follows it. Overload frames are not recognized. |
 | `can_rx` and `can_line` resynchronize without a synchronization jump width limit | CAN | Every recessive-to-dominant edge in the window re-times the sample point (`can_line`: an edge 3-9 or 14-32 cycles after the sample, except one caused by the node's own TXD) | Tolerates a transmitter 2.2% fast to 3.5% slow in simulation, beyond CAN's 1.58%; a glitch inside the window can shift one bit's sample point. |
-| Ethernet receive jitter tolerance is about +/- 9 ns per transition | 10BASE-T | 16-state decoder with half-cycle sampling at 40 MHz | Passes at +/- 9 ns and fails at +/- 10 ns in simulation; IEEE 802.3 asks for more margin. Lab-grade with short cables. |
-| Ethernet full duplex at line rate exceeds the Host link | 10BASE-T | 10 Mbit/s each way needs more than the measured 14.5 Mbit/s sustained receive rate at 40 MHz | Half duplex works. Collision detection is possible because transmit and receive use different engines and G2 is free during transmit. |
+| Ethernet full duplex at line rate exceeds the Host link | 10BASE-T | 10 Mbit/s each way needs more than the 6.25 Mbit/s each way that `test_host_duplex_throughput` demonstrates | Half duplex works. Collision detection is possible because transmit and receive use different engines and G2 is free during transmit. |
 | No collision handling or link integrity state | 10BASE-T | Not written yet | The transmitter sends link pulses, and a received link pulse makes a short record without an SFD, but nothing tracks link state, detects collisions or backs off. |
 | One optional side-set pin leaves 3 delay bits | USB | Shared side-set and delay field | The USB host program runs its engine at CLKDIV 3 to reach 32 cycles per bit. |
 | The G2 receive enable goes through an output pin | USB | The bit state machine reads its inputs only from the pin space | `usb_ls_host` uses output pin 12 as the receive enable, so that pin is not available for anything else. |
-| A CAN transmit queue that runs dry inside a frame holds TXD at the last bit's level (B14) | CAN | The underrun guard needs about 4 words, and the node uses all 128 | `can_node` stalls on the empty queue; if the last bit was dominant the bus stays dominant until the Host queues more. The 8-word queue holds 32 bits (32 µs at 1 Mbit/s), so the Host must stream a frame longer than that without pausing as long, as for Ethernet transmit. |
+| The CAN transmit queue holds 4 words | CAN | Buffer mode FIFO_TX_RAM gives half of the 8 entries to the error counters and scratch RAM | 4 words hold 20 bits: a Host must refill within about 14 µs at 1 Mbit/s. If the queue runs dry inside a frame (B14) the node releases TXD within a bit, sets flag 4 and clears flag 6, then signals the error and receives on; `test_can_node_transmit_underrun` checks it. The Host must not clear the queue while the node is transmitting. |
 | SWD supports ORUNDETECT = 0 only | SWD | Program size | With overrun detection enabled, ADIv5 expects a data phase after WAIT or FAULT, which the program skips. |
 | Controller roles only for SPI, I2C, JTAG and SWD | SPI, I2C, JTAG, SWD | Not written yet | Peripheral, target and debug-target roles need their own programs. |
 
@@ -146,4 +164,4 @@ The timed wait and the ISR count (instruction set version 2) removed the earlier
 | PS/2 | Pull-ups on CLK and DATA |
 | CAN | A CAN transceiver (TXD, RXD) |
 | Low-speed USB | 1.5 kOhm pull-up on D- at the device end; 15 kOhm pull-downs at the host end; a 48 MHz board clock |
-| 10BASE-T | Isolation magnetics, transmit resistor network and a receive comparator; a 40 MHz board clock |
+| 10BASE-T | Isolation magnetics, transmit resistor network and a receive comparator |

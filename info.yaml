@@ -7,8 +7,8 @@ project:
   language:     "Verilog" # other examples include SystemVerilog, Amaranth, VHDL, etc
   clock_hz:     50000000 # Initial target, matching CLOCK_PERIOD=20ns in src/config.json
 
-  # Competition allocation: 24 tiles on IHP's 130nm CMOS5L process.
-  tiles: "6x4"
+  # Competition allocation: 32 tiles on IHP's 130nm CMOS5L process.
+  tiles: "8x4"
 
   # Your top module name must start with "tt_um_". Make it unique by including your github username:
   top_module:  "tt_um_jedinakdev_protocol_emulator"
@@ -24,6 +24,7 @@ project:
     - "pe_store.v"
     - "pe_pins.v"
     - "pe_g2.v"
+    - "pe_cr.v"
     - "pe_engine.v"
     - "pe_fifo.v"
     - "pe_lfsr.v"

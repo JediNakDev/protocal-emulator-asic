@@ -6,7 +6,7 @@ SIM ?= icarus
 FST ?= -fst # Use more efficient FST format
 TOPLEVEL_LANG ?= verilog
 SRC_DIR = $(PWD)/../src
-PROJECT_SOURCES = project.v pe_host.v pe_global.v pe_imem.v pe_store.v pe_pins.v pe_g2.v pe_engine.v pe_fifo.v pe_lfsr.v
+PROJECT_SOURCES = project.v pe_host.v pe_global.v pe_imem.v pe_store.v pe_pins.v pe_g2.v pe_cr.v pe_engine.v pe_fifo.v pe_lfsr.v
 
 ifneq ($(GATES),yes)
 
@@ -31,10 +31,10 @@ VERILOG_SOURCES += $(PWD)/gate_level_netlist.v
 
 endif
 
-# Latch-based storage build (H2): make LATCH=yes
-ifeq ($(LATCH),yes)
-COMPILE_ARGS    += -DPE_LATCH_STORE
-SIM_BUILD       := $(SIM_BUILD)_latch
+# Flip-flop storage instead of the latches used for tapeout (H2): make FLOP=yes
+ifeq ($(FLOP),yes)
+COMPILE_ARGS    += -DPE_FLOP_STORE
+SIM_BUILD       := $(SIM_BUILD)_flop
 endif
 
 # Allow sharing configuration between design and testbench via `include`:
