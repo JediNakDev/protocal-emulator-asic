@@ -5,7 +5,7 @@ RTL_SOURCES := $(addprefix src/,project.v pe_host.v pe_global.v pe_imem.v pe_sto
 export PATH := $(CURDIR)/.venv/bin:$(PATH)
 PYTHON ?= $(if $(wildcard $(CURDIR)/.venv/bin/python),$(CURDIR)/.venv/bin/python,python3)
 
-.PHONY: help setup test test-tooling lint synth-check formal check clean model
+.PHONY: help setup test test-tooling lint synth-check formal check clean model demo
 
 help:
 	@echo "make setup - create .venv and install pinned test dependencies (requires uv)"
@@ -16,6 +16,7 @@ help:
 	@echo "make formal - prove the properties in formal/ with yosys-smtbmc (FORMAL_SOLVER, default z3)"
 	@echo "make check - run lint, synthesis checks, formal proofs and simulation"
 	@echo "make model - build and run the C protocol-engine model tests"
+	@echo "make demo  - capture, edit, replay and decode a UART fault in RTL simulation"
 	@echo "make clean - remove simulation outputs"
 
 setup:
@@ -61,6 +62,9 @@ check: lint synth-check formal test-tooling test
 
 model:
 	$(MAKE) -C model test
+
+demo:
+	$(PYTHON) tools/demo_waveform.py
 
 clean:
 	$(MAKE) -C test clean
